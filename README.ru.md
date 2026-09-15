@@ -9,7 +9,7 @@ Viewlume — быстрый просмотрщик изображений с GPU
 
 ## Демонстрация
 
-<video src="https://raw.githubusercontent.com/vaniley/viewlume/main/docs/demo.mp4" controls width="100%"></video>
+![Viewlume Демо](docs/demo.gif)
 
 ## Возможности
 
