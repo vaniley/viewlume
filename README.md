@@ -9,7 +9,7 @@ Viewlume is a fast, GPU-accelerated image viewer for Linux and Windows. It keeps
 
 ## Demo
 
-<video src="docs/demo.webm" controls width="100%"></video>
+<video src="https://raw.githubusercontent.com/vaniley/viewlume/main/docs/demo.mp4" controls width="100%"></video>
 
 ## Highlights
 
