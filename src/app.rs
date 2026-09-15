@@ -484,9 +484,8 @@ impl ImageViewerApp {
             }
             WindowMode::Windowed => {
                 self.window_mode = WindowMode::Overlay;
-                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
-                ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
+                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
                 self.show_toast(
                     self.tr("Mode: Fullscreen overlay", "Режим: полноэкранный оверлей"),
                 );

@@ -7,20 +7,73 @@
       <Directory Id="INSTALLFOLDER" Name="Viewlume">
         <Component Id="ApplicationFiles" Guid="A4EB2B92-9209-45F8-930B-3F1C53E85C9B">
           <File Id="ViewlumeExe" Source="$(var.BinaryPath)" KeyPath="yes" />
+          <File Id="ViewlumeIco" Source="packaging/windows/viewlume.ico" />
+
+          <!-- Open-with handler -->
           <RegistryValue Root="HKLM" Key="Software\Classes\Applications\viewlume.exe\shell\open\command"
                          Value="&quot;[#ViewlumeExe]&quot; &quot;%1&quot;" Type="string" />
+
+          <!-- Registered application for Default Programs -->
           <RegistryValue Root="HKLM" Key="Software\RegisteredApplications" Name="Viewlume"
                          Value="Software\Viewlume\Capabilities" Type="string" />
           <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities" Name="ApplicationName"
                          Value="Viewlume" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities" Name="ApplicationDescription"
+                         Value="Fast GPU-accelerated image viewer" Type="string" />
+
+          <!-- ProgId: icon and open command -->
+          <RegistryValue Root="HKLM" Key="Software\Classes\Viewlume.Image" Name="FriendlyTypeName"
+                         Value="Image (Viewlume)" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Viewlume.Image\DefaultIcon"
+                         Value="[#ViewlumeIco]" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Classes\Viewlume.Image\shell\open\command"
+                         Value="&quot;[#ViewlumeExe]&quot; &quot;%1&quot;" Type="string" />
+
+          <!-- File associations (matches SUPPORTED_IMAGE_EXTENSIONS) -->
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".bmp"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".dds"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".exr"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".ff"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".gif"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".hdr"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".ico"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".jfif"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".jpe"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".jpeg"
+                         Value="Viewlume.Image" Type="string" />
           <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".jpg"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".pam"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".pbm"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".pgm"
                          Value="Viewlume.Image" Type="string" />
           <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".png"
                          Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".pnm"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".ppm"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".qoi"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".tga"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".tif"
+                         Value="Viewlume.Image" Type="string" />
+          <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".tiff"
+                         Value="Viewlume.Image" Type="string" />
           <RegistryValue Root="HKLM" Key="Software\Viewlume\Capabilities\FileAssociations" Name=".webp"
                          Value="Viewlume.Image" Type="string" />
-          <RegistryValue Root="HKLM" Key="Software\Classes\Viewlume.Image\shell\open\command"
-                         Value="&quot;[#ViewlumeExe]&quot; &quot;%1&quot;" Type="string" />
         </Component>
       </Directory>
     </StandardDirectory>

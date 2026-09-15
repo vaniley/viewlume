@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 pub mod app;
 pub mod cache;
 pub mod canvas;
@@ -39,11 +41,9 @@ fn main() -> eframe::Result<()> {
         .with_drag_and_drop(true);
 
     if is_overlay {
-        // Maximized + no decorations instead of fullscreen — Hyprland treats
-        // fullscreen surfaces as opaque, which blocks transparency.
         viewport_builder = viewport_builder
             .with_decorations(false)
-            .with_maximized(true);
+            .with_fullscreen(true);
     } else {
         viewport_builder = viewport_builder.with_decorations(true).with_maximized(true);
     }
