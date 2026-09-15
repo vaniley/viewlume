@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: viewlume-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: viewlume-windows-x86_64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libwayland-dev libxkbcommon-dev
+
+      - name: Install stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist/viewlume
+          cp target/${{ matrix.target }}/release/viewlume dist/viewlume/
+          cp README.md LICENSE CHANGELOG.md dist/viewlume/
+          tar -C dist -czf dist/${{ matrix.artifact }}.tar.gz viewlume
+          cd dist
+          sha256sum ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/viewlume | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/viewlume.exe dist/viewlume/
+          Copy-Item README.md, LICENSE, CHANGELOG.md dist/viewlume/
+          Compress-Archive -Path dist/viewlume -DestinationPath dist/${{ matrix.artifact }}.zip
+          $hash = (Get-FileHash dist/${{ matrix.artifact }}.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.artifact }}.zip" | Out-File -Encoding ascii dist/${{ matrix.artifact }}.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}" dist/*
+          --repo "${GITHUB_REPOSITORY}"
+          --verify-tag
+          --generate-notes
+          --title "Viewlume ${GITHUB_REF_NAME}"

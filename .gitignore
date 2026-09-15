@@ -1,0 +1,10 @@
+/target/
+/dist/
+*.log
+*.profraw
+.DS_Store
+Thumbs.db
+/.idea/
+/.vscode/
+*.swp
+*.swo
