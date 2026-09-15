@@ -4,6 +4,12 @@ All notable changes to Viewlume are documented in this file. The project follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-15
+
+### Fixed
+
+- Correct WiX preprocessor argument syntax in the Windows MSI release build.
+
 ## [0.2.0] - 2026-09-15
 
 ### Added
@@ -43,6 +49,7 @@ All notable changes to Viewlume are documented in this file. The project follows
 - Zoom and position loss when switching between images with different resolutions.
 - Runaway panning caused by applying cumulative drag displacement every frame.
 
-[Unreleased]: https://github.com/vaniley/viewlume/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/vaniley/viewlume/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/vaniley/viewlume/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/vaniley/viewlume/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/vaniley/viewlume/releases/tag/v0.1.0
