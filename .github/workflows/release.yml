@@ -109,7 +109,7 @@ jobs:
           Compress-Archive -Path dist/viewlume -DestinationPath dist/${{ matrix.artifact }}.zip
           dotnet tool install --global wix --version 5.0.2
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          wix build packaging/windows/viewlume.wxs -arch x64 -dBinaryPath=target/${{ matrix.target }}/release/viewlume.exe -dProductVersion=$version -o dist/${{ matrix.artifact }}.msi
+          wix build packaging/windows/viewlume.wxs -arch x64 -d "BinaryPath=target/${{ matrix.target }}/release/viewlume.exe" -d "ProductVersion=$version" -o dist/${{ matrix.artifact }}.msi
           if ($env:WINDOWS_CERTIFICATE_BASE64) {
             & signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f certificate.pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD dist/${{ matrix.artifact }}.msi
             Remove-Item certificate.pfx
