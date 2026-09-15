@@ -33,7 +33,7 @@ image = { version = "0.25", default-features = false, features = [
     "qoi",
 ] }
 fast_image_resize = { version = "5", features = ["rayon"] }
-kamadak-exif = "0.5"
+kamadak-exif = "0.6"
 
 # Concurrency and Data Structures
 crossbeam-channel = "0.5"
