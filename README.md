@@ -24,7 +24,7 @@ Viewlume is a fast, GPU-accelerated image viewer for Linux and Windows. It keeps
 
 ## Supported formats
 
-JPEG/JFIF, PNG, WebP, GIF (first frame), BMP, TIFF, QOI, ICO, TGA, DDS,
+JPEG/JFIF, PNG, animated WebP and GIF, BMP, TIFF, QOI, ICO, TGA, DDS,
 OpenEXR, Radiance HDR, Farbfeld, and PNM (PBM/PGM/PPM/PAM).
 
 ## Install
@@ -36,13 +36,15 @@ Download the archive for your platform from [GitHub Releases](https://github.com
 ```console
 # Download and verify
 wget https://github.com/vaniley/viewlume/releases/latest/download/viewlume-linux-x86_64.tar.gz
-wget https://github.com/vaniley/viewlume/releases/latest/download/viewlume-linux-x86_64.tar.gz.sha256
-sha256sum -c viewlume-linux-x86_64.tar.gz.sha256
+wget https://github.com/vaniley/viewlume/releases/latest/download/viewlume-linux-x86_64.sha256
+sha256sum -c viewlume-linux-x86_64.sha256
 
 # Extract and install
 tar xzf viewlume-linux-x86_64.tar.gz
 sudo cp viewlume/viewlume /usr/local/bin/
 ```
+
+The release also provides a portable AppImage and a DEB package.
 
 Runtime dependencies (Wayland/X11 libs and GTK for file dialogs):
 
@@ -58,7 +60,7 @@ sudo dnf install wayland-devel libxkbcommon gtk3
 
 ### Windows
 
-1. Download `viewlume-windows-x86_64.zip` from [Releases](https://github.com/vaniley/viewlume/releases).
+1. Download the MSI installer or `viewlume-windows-x86_64.zip` from [Releases](https://github.com/vaniley/viewlume/releases).
 2. Extract the ZIP to any folder (e.g. `C:\Program Files\Viewlume\`).
 3. Run `viewlume.exe`. No extra dependencies required.
 4. Optionally add the folder to `PATH` (Settings > System > Advanced > Environment Variables > Path).
@@ -88,6 +90,7 @@ viewlume path/to/folder
 | `I` | Toggle image information |
 | `O` | Open an image |
 | `S` | Open settings |
+| `Space` | Pause or resume an animated GIF/WebP |
 | `Esc` | Close settings or leave fullscreen |
 
 Files can also be opened with drag and drop.
@@ -116,6 +119,7 @@ Viewlume stores settings in the platform configuration directory:
 - Windows: `%APPDATA%\vaniley\viewlume\config\config.toml`
 
 An existing configuration from the former `image-viewer` name is migrated automatically on first launch.
+The interface supports English and Russian; English is used by default.
 
 ## Contributing
 

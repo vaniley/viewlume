@@ -181,9 +181,21 @@ pub struct ImageViewerApp {
     pending_open_path: Option<PathBuf>,
     navigation_pace: NavigationPace,
     pending_load_results: VecDeque<LoadResult>,
+    animation_frame_index: usize,
+    animation_deadline: Instant,
+    animation_paused: bool,
+    animation_speed: f32,
 }
 
 impl ImageViewerApp {
+    fn tr(&self, english: &'static str, russian: &'static str) -> &'static str {
+        if self.config.general.language.is_russian() {
+            russian
+        } else {
+            english
+        }
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, initial_target: Option<PathBuf>) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = Color32::from_rgb(12, 14, 18);
@@ -238,6 +250,10 @@ impl ImageViewerApp {
             pending_open_path: None,
             navigation_pace: NavigationPace::default(),
             pending_load_results: VecDeque::new(),
+            animation_frame_index: 0,
+            animation_deadline: Instant::now(),
+            animation_paused: false,
+            animation_speed: 1.0,
         };
 
         if let Some(target) = initial_target {
@@ -464,14 +480,16 @@ impl ImageViewerApp {
                 ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
                 ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
-                self.show_toast("Mode: Windowed");
+                self.show_toast(self.tr("Mode: Windowed", "Режим: оконный"));
             }
             WindowMode::Windowed => {
                 self.window_mode = WindowMode::Overlay;
                 ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
                 ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
-                self.show_toast("Mode: Fullscreen overlay");
+                self.show_toast(
+                    self.tr("Mode: Fullscreen overlay", "Режим: полноэкранный оверлей"),
+                );
             }
         }
     }
@@ -506,6 +524,7 @@ impl ImageViewerApp {
                             height,
                             bytes_size: image.as_raw().len() * std::mem::size_of::<Color32>(),
                             color_image: image,
+                            animation_frames: Arc::from([]),
                         });
                         self.canvas_state.update_texture(
                             ctx,
@@ -540,6 +559,11 @@ impl ImageViewerApp {
                         self.is_loading = false;
                         match result {
                             Ok(img) => {
+                                let initial_animation_delay = img
+                                    .animation_frames
+                                    .first()
+                                    .map(|frame| frame.delay)
+                                    .unwrap_or_default();
                                 let replacing_preview = self.current_image_is_preview
                                     && self.current_image_path.as_ref() == Some(&path);
                                 self.canvas_state.update_texture(
@@ -551,6 +575,9 @@ impl ImageViewerApp {
                                         && self.config.rendering.animate_image_transitions,
                                 );
                                 self.current_image = Some(img);
+                                self.animation_frame_index = 0;
+                                self.animation_deadline = Instant::now() + initial_animation_delay;
+                                self.animation_paused = false;
                                 self.current_image_path = Some(path.clone());
                                 self.current_image_is_preview = false;
                                 self.texture_dirty = false;
@@ -653,7 +680,7 @@ impl ImageViewerApp {
                 let vp = ctx.screen_rect();
                 self.canvas_state
                     .reset_view_fit(img.width as f32, img.height as f32, vp);
-                self.show_toast("View: Fit to Window");
+                self.show_toast(self.tr("View: Fit to window", "Вид: вписано в окно"));
             }
         }
         if one_pressed {
@@ -661,7 +688,7 @@ impl ImageViewerApp {
                 let vp = ctx.screen_rect();
                 self.canvas_state
                     .reset_view_actual_size(img.width as f32, img.height as f32, vp);
-                self.show_toast("View: 1:1 (100%)");
+                self.show_toast(self.tr("View: 1:1 (100%)", "Вид: 1:1 (100%)"));
             }
         }
         if f11_pressed {
@@ -693,9 +720,11 @@ impl ImageViewerApp {
                 FilmstripVisibility::Hidden => FilmstripVisibility::Hover,
             };
             let label = match self.config.filmstrip.visibility {
-                FilmstripVisibility::Hover => "Filmstrip: Auto-hover",
-                FilmstripVisibility::Always => "Filmstrip: Always visible",
-                FilmstripVisibility::Hidden => "Filmstrip: Hidden",
+                FilmstripVisibility::Hover => {
+                    self.tr("Filmstrip: On hover", "Карусель: при наведении")
+                }
+                FilmstripVisibility::Always => self.tr("Filmstrip: Always", "Карусель: всегда"),
+                FilmstripVisibility::Hidden => self.tr("Filmstrip: Hidden", "Карусель: скрыта"),
             };
             self.show_toast(label);
         }
@@ -706,9 +735,9 @@ impl ImageViewerApp {
                 FilterMode::Bilinear => FilterMode::Auto,
             };
             let label = match self.config.rendering.filter_mode {
-                FilterMode::Auto => "Filter: Auto (Crisp zoom)",
-                FilterMode::Nearest => "Filter: Nearest (Pixel art)",
-                FilterMode::Bilinear => "Filter: Bilinear (Smooth)",
+                FilterMode::Auto => self.tr("Filter: Auto", "Фильтр: авто"),
+                FilterMode::Nearest => self.tr("Filter: Nearest", "Фильтр: без сглаживания"),
+                FilterMode::Bilinear => self.tr("Filter: Bilinear", "Фильтр: билинейный"),
             };
             if let Some(ref img) = self.current_image {
                 self.canvas_state.update_texture(
@@ -778,12 +807,33 @@ impl eframe::App for ImageViewerApp {
     }
 
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        let ru = self.config.general.language.is_russian();
+        let tr = |english: &'static str, russian: &'static str| if ru { russian } else { english };
         let dt = ctx.input(|i| i.unstable_dt).max(0.001);
         let cursor_pos = ctx.input(|i| i.pointer.hover_pos());
 
         // Process async worker responses
         self.process_scan_results();
         self.process_incoming_results(ctx);
+        if !self.animation_paused {
+            if let Some(image) = self.current_image.as_ref() {
+                let frames = &image.animation_frames;
+                if !frames.is_empty() && Instant::now() >= self.animation_deadline {
+                    self.animation_frame_index = (self.animation_frame_index + 1) % frames.len();
+                    let frame = &frames[self.animation_frame_index];
+                    self.canvas_state
+                        .update_animation_frame(ctx, Arc::clone(&frame.color_image));
+                    self.animation_deadline =
+                        Instant::now() + frame.delay.div_f32(self.animation_speed.clamp(0.25, 4.0));
+                }
+                if !frames.is_empty() {
+                    ctx.request_repaint_after(
+                        self.animation_deadline
+                            .saturating_duration_since(Instant::now()),
+                    );
+                }
+            }
+        }
         if self.texture_dirty {
             if let Some(image) = self.current_image.as_ref() {
                 self.canvas_state.update_texture(
@@ -799,6 +849,20 @@ impl eframe::App for ImageViewerApp {
 
         // Handle hotkeys & drag-and-drop
         self.handle_keyboard_inputs(ctx);
+        if ctx.input(|input| input.key_pressed(egui::Key::Space))
+            && self
+                .current_image
+                .as_ref()
+                .is_some_and(|image| !image.animation_frames.is_empty())
+        {
+            self.animation_paused = !self.animation_paused;
+            self.animation_deadline = Instant::now();
+            self.show_toast(if self.animation_paused {
+                self.tr("Animation paused", "Анимация на паузе")
+            } else {
+                self.tr("Animation playing", "Анимация воспроизводится")
+            });
+        }
         self.handle_drag_and_drop(ctx);
 
         // Manage UI auto-fade
@@ -843,7 +907,12 @@ impl eframe::App for ImageViewerApp {
                     &self.config.rendering,
                     self.config.window.show_checkerboard_for_transparent,
                     !pointer_over_filmstrip,
-                    !self.is_loading && self.load_error.is_none(),
+                    (!self.is_loading && self.load_error.is_none()).then(|| {
+                        tr(
+                            "Open an image or drop it here",
+                            "Откройте изображение или перетащите его сюда",
+                        )
+                    }),
                 );
 
                 // Double-click on canvas action
@@ -921,7 +990,7 @@ impl eframe::App for ImageViewerApp {
                         open_rect,
                         "open",
                         ToolbarIcon::Open,
-                        "Открыть изображение (O)",
+                        tr("Open image (O)", "Открыть изображение (O)"),
                         self.ui_opacity,
                     ) {
                         if let Some(file) = rfd::FileDialog::new()
@@ -936,7 +1005,7 @@ impl eframe::App for ImageViewerApp {
                         fit_rect,
                         "fit",
                         ToolbarIcon::Fit,
-                        "Вписать в окно (F)",
+                        tr("Fit to window (F)", "Вписать в окно (F)"),
                         self.ui_opacity,
                     ) {
                         if let Some(ref img) = self.current_image {
@@ -957,7 +1026,7 @@ impl eframe::App for ImageViewerApp {
                         settings_rect,
                         "settings",
                         ToolbarIcon::Settings,
-                        "Настройки (S)",
+                        tr("Settings (S)", "Настройки (S)"),
                         self.ui_opacity,
                     ) {
                         self.settings_dialog.is_open = true;
@@ -967,7 +1036,7 @@ impl eframe::App for ImageViewerApp {
                         window_rect,
                         "window-mode",
                         ToolbarIcon::Window,
-                        "Переключить режим окна (F11)",
+                        tr("Toggle window mode (F11)", "Переключить режим окна (F11)"),
                         self.ui_opacity,
                     ) {
                         self.toggle_window_mode(ctx);
@@ -978,7 +1047,7 @@ impl eframe::App for ImageViewerApp {
                             close_rect,
                             "close",
                             ToolbarIcon::Close,
-                            "Закрыть",
+                            tr("Close", "Закрыть"),
                             self.ui_opacity,
                         )
                     {
@@ -992,18 +1061,45 @@ impl eframe::App for ImageViewerApp {
                         let badge_alpha = (210.0 * self.ui_opacity) as u8;
                         let zoom_pct = (self.canvas_state.scale * 100.0).round() as i64;
                         let filter_name = match self.config.rendering.filter_mode {
-                            FilterMode::Auto => "Auto",
-                            FilterMode::Nearest => "Nearest",
-                            FilterMode::Bilinear => "Bilinear",
+                            FilterMode::Auto => tr("Auto", "Авто"),
+                            FilterMode::Nearest => tr("Nearest", "Без сглаживания"),
+                            FilterMode::Bilinear => tr("Bilinear", "Билинейный"),
                         };
 
+                        let animation_status = (!img.animation_frames.is_empty()).then(|| {
+                            format!(
+                                " • {}/{} {}",
+                                self.animation_frame_index + 1,
+                                img.animation_frames.len(),
+                                if self.animation_paused { "⏸" } else { "▶" }
+                            )
+                        });
                         let info_text = format!(
-                            "{}×{} • {}% • {}",
-                            img.width, img.height, zoom_pct, filter_name
+                            "{}×{} • {}% • {}{}",
+                            img.width,
+                            img.height,
+                            zoom_pct,
+                            filter_name,
+                            animation_status.as_deref().unwrap_or_default()
                         );
                         let badge_rect = Rect::from_min_size(
-                            Pos2::new(viewport.min.x + 20.0, viewport.max.y - 40.0),
-                            Vec2::new(200.0, 26.0),
+                            Pos2::new(
+                                viewport.min.x + 20.0,
+                                viewport.max.y
+                                    - if img.animation_frames.is_empty() {
+                                        40.0
+                                    } else {
+                                        88.0
+                                    },
+                            ),
+                            Vec2::new(
+                                if img.animation_frames.is_empty() {
+                                    200.0
+                                } else {
+                                    280.0
+                                },
+                                26.0,
+                            ),
                         );
 
                         ui.painter().rect(
@@ -1023,18 +1119,7 @@ impl eframe::App for ImageViewerApp {
                     }
                 }
 
-                // 6. Keep loading silent; only surface an actual error.
-                if let Some(ref err) = self.load_error {
-                    ui.painter().text(
-                        viewport.center(),
-                        egui::Align2::CENTER_CENTER,
-                        format!("Failed to load image:\n{}", err),
-                        egui::FontId::proportional(16.0),
-                        Color32::from_rgb(239, 68, 68),
-                    );
-                }
-
-                // 7. Toast notification
+                // 6. Toast notification
                 if let Some((ref msg, time)) = self.status_message {
                     let elapsed = time.elapsed().as_secs_f32();
                     if elapsed < 2.0 {
@@ -1065,7 +1150,87 @@ impl eframe::App for ImageViewerApp {
                 }
             });
 
-        // 8. Settings Dialog
+        if let Some(frame_count) = self
+            .current_image
+            .as_ref()
+            .map(|image| image.animation_frames.len())
+            .filter(|count| *count > 1)
+        {
+            egui::Area::new(egui::Id::new("animation-controls"))
+                .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(16.0, -16.0))
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(Color32::from_rgba_premultiplied(18, 20, 25, 232))
+                        .rounding(8.0)
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.spacing_mut().interact_size.y = 44.0;
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button(if self.animation_paused {
+                                        tr("Play", "Воспроизвести")
+                                    } else {
+                                        tr("Pause", "Пауза")
+                                    })
+                                    .clicked()
+                                {
+                                    self.animation_paused = !self.animation_paused;
+                                    self.animation_deadline = Instant::now();
+                                }
+                                ui.label(format!(
+                                    "{} / {}",
+                                    self.animation_frame_index + 1,
+                                    frame_count
+                                ));
+                                ui.add(
+                                    egui::Slider::new(&mut self.animation_speed, 0.25..=4.0)
+                                        .logarithmic(true)
+                                        .suffix("×")
+                                        .show_value(true),
+                                );
+                            });
+                        });
+                });
+        }
+
+        if let Some(error) = self.load_error.clone() {
+            let mut retry = false;
+            let mut open_another = false;
+            egui::Window::new(tr("Could not open image", "Не удалось открыть изображение"))
+                .id(egui::Id::new("load-error"))
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .collapsible(false)
+                .resizable(false)
+                .fixed_size(Vec2::new(420.0, 150.0))
+                .show(ctx, |ui| {
+                    ui.spacing_mut().interact_size.y = 44.0;
+                    if let Some(path) = self.current_image_path.as_ref() {
+                        ui.strong(path.file_name().unwrap_or_default().to_string_lossy());
+                    }
+                    ui.colored_label(Color32::from_rgb(248, 113, 113), error);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        retry = ui.button(tr("Retry", "Повторить")).clicked();
+                        open_another = ui.button(tr("Open another…", "Открыть другое…")).clicked();
+                    });
+                });
+            if retry {
+                if let Some(path) = self.current_image_path.clone() {
+                    self.cache.clear();
+                    self.open_target(&path, ctx);
+                }
+            }
+            if open_another {
+                if let Some(file) = rfd::FileDialog::new()
+                    .add_filter("Images", SUPPORTED_IMAGE_EXTENSIONS)
+                    .pick_file()
+                {
+                    self.open_target(&file, ctx);
+                }
+            }
+        }
+
+        // 7. Settings Dialog
         if self.settings_dialog.show(ctx, &mut self.config) {
             // Re-apply settings if changed
             if let Some(ref img) = self.current_image {

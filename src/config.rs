@@ -3,6 +3,42 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Language {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "ru")]
+    Russian,
+}
+
+impl Language {
+    pub fn is_russian(self) -> bool {
+        match self {
+            Self::Russian => true,
+            Self::English => false,
+            Self::Auto => std::env::var("LANG")
+                .or_else(|_| std::env::var("LANGUAGE"))
+                .is_ok_and(|locale| locale.to_ascii_lowercase().starts_with("ru")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeneralConfig {
+    pub language: Language,
+}
+
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self {
+            language: Language::English,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WindowMode {
     #[serde(rename = "overlay")]
     Overlay,
@@ -163,6 +199,7 @@ impl Default for CacheConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewerConfig {
+    pub general: GeneralConfig,
     pub window: WindowConfig,
     pub rendering: RenderingConfig,
     pub navigation: NavigationConfig,
@@ -228,5 +265,21 @@ impl ViewerConfig {
         fs::write(&path, toml_str)
             .map_err(|e| format!("Failed to write config to {:?}: {}", path, e))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn english_is_the_default_interface_language() {
+        assert_eq!(ViewerConfig::default().general.language, Language::English);
+    }
+
+    #[test]
+    fn old_configs_receive_the_english_default() {
+        let config: ViewerConfig = toml::from_str("").expect("deserialize legacy config");
+        assert_eq!(config.general.language, Language::English);
     }
 }

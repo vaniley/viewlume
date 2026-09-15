@@ -195,6 +195,20 @@ impl CanvasState {
         }
     }
 
+    pub fn update_animation_frame(&mut self, ctx: &egui::Context, frame: Arc<egui::ColorImage>) {
+        let options = Self::get_texture_options(self.current_filter, self.target_scale);
+        if let Some(texture) = self.texture.as_mut() {
+            texture.set(frame, options);
+        } else {
+            self.texture_sequence += 1;
+            self.texture = Some(ctx.load_texture(
+                format!("active-image-{}", self.texture_sequence),
+                frame,
+                options,
+            ));
+        }
+    }
+
     fn animate(&mut self, dt: f32, cfg: &RenderingConfig) -> bool {
         let mut moving = false;
         let zoom_blend = 1.0 - (-24.0 * dt).exp();
@@ -249,7 +263,7 @@ pub fn render_canvas(
     render_cfg: &RenderingConfig,
     show_checkerboard: bool,
     allow_wheel_zoom: bool,
-    show_empty_hint: bool,
+    empty_hint: Option<&str>,
 ) -> CanvasResponse {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -363,11 +377,11 @@ pub fn render_canvas(
                 Color32::from_white_alpha((transition * 255.0) as u8),
             );
         }
-    } else if show_empty_hint {
+    } else if let Some(empty_hint) = empty_hint {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Откройте изображение или перетащите его сюда",
+            empty_hint,
             egui::FontId::proportional(16.0),
             Color32::from_gray(142),
         );
@@ -391,6 +405,7 @@ mod tests {
                 [width as usize, height as usize],
                 Color32::WHITE,
             )),
+            animation_frames: Arc::from([]),
         }
     }
 

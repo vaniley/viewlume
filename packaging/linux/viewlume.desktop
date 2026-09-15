@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Viewlume
+Comment=Fast GPU-accelerated image viewer
+Exec=viewlume %F
+Icon=viewlume
+Terminal=false
+Categories=Graphics;Viewer;
+MimeType=image/jpeg;image/png;image/webp;image/gif;image/bmp;image/tiff;image/x-tga;image/x-exr;image/x-portable-anymap;

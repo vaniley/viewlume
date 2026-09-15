@@ -4,6 +4,23 @@ All notable changes to Viewlume are documented in this file. The project follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-15
+
+### Added
+
+- Animated GIF and WebP playback with pause, frame progress, and speed control.
+- English and Russian interfaces with English as the default language.
+- AppImage, DEB, and MSI release packages, file associations, SBOMs, provenance,
+  and optional Authenticode signing.
+- Recovery actions for failed image loads.
+
+### Changed
+
+- Reject files, dimensions, and animations that could exhaust available memory.
+- Invalidate cached images and thumbnails when their source file changes.
+- Exercise the built-in WebP, ICO, TGA, DDS, HDR, OpenEXR, Farbfeld, and PNM
+  decoders in automated tests.
+
 ## [0.1.0] - 2026-09-15
 
 ### Added
@@ -26,5 +43,6 @@ All notable changes to Viewlume are documented in this file. The project follows
 - Zoom and position loss when switching between images with different resolutions.
 - Runaway panning caused by applying cumulative drag displacement every frame.
 
-[Unreleased]: https://github.com/vaniley/viewlume/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/vaniley/viewlume/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/vaniley/viewlume/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/vaniley/viewlume/releases/tag/v0.1.0

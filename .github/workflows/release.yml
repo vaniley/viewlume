@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -50,6 +52,20 @@ jobs:
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      - name: Sign Windows executable when a certificate is configured
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ($env:WINDOWS_CERTIFICATE_BASE64) {
+            [IO.File]::WriteAllBytes("certificate.pfx", [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+            & signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f certificate.pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD target/${{ matrix.target }}/release/viewlume.exe
+          } else {
+            Write-Host "Signing certificate not configured; producing an unsigned executable."
+          }
+
       - name: Package Linux archive
         if: runner.os == 'Linux'
         shell: bash
@@ -58,8 +74,30 @@ jobs:
           cp target/${{ matrix.target }}/release/viewlume dist/viewlume/
           cp README.md LICENSE CHANGELOG.md dist/viewlume/
           tar -C dist -czf dist/${{ matrix.artifact }}.tar.gz viewlume
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist/appdir/usr/bin dist/appdir/usr/share/applications dist/appdir/usr/share/icons/hicolor/scalable/apps
+          cp target/${{ matrix.target }}/release/viewlume dist/appdir/usr/bin/
+          cp packaging/linux/viewlume.desktop dist/appdir/
+          cp packaging/linux/viewlume.desktop dist/appdir/usr/share/applications/
+          cp packaging/linux/viewlume.svg dist/appdir/viewlume.svg
+          cp packaging/linux/viewlume.svg dist/appdir/usr/share/icons/hicolor/scalable/apps/
+          ln -s usr/bin/viewlume dist/appdir/AppRun
+          curl -fsSL -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+          OUTPUT="dist/${{ matrix.artifact }}.AppImage" APPIMAGE_EXTRACT_AND_RUN=1 ./linuxdeploy \
+            --appdir dist/appdir \
+            --executable target/${{ matrix.target }}/release/viewlume \
+            --desktop-file packaging/linux/viewlume.desktop \
+            --icon-file packaging/linux/viewlume.svg \
+            --output appimage
+          mkdir -p dist/deb/DEBIAN dist/deb/usr/bin dist/deb/usr/share/applications dist/deb/usr/share/icons/hicolor/scalable/apps
+          cp target/${{ matrix.target }}/release/viewlume dist/deb/usr/bin/
+          cp packaging/linux/viewlume.desktop dist/deb/usr/share/applications/
+          cp packaging/linux/viewlume.svg dist/deb/usr/share/icons/hicolor/scalable/apps/
+          printf 'Package: viewlume\nVersion: %s\nSection: graphics\nPriority: optional\nArchitecture: amd64\nMaintainer: vaniley\nDepends: libgtk-3-0, libwayland-client0, libxkbcommon0\nDescription: Fast GPU-accelerated image viewer\n' "$version" > dist/deb/DEBIAN/control
+          dpkg-deb --build --root-owner-group dist/deb dist/${{ matrix.artifact }}.deb
           cd dist
-          sha256sum ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+          sha256sum ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}.AppImage ${{ matrix.artifact }}.deb > ${{ matrix.artifact }}.sha256
 
       - name: Package Windows archive
         if: runner.os == 'Windows'
@@ -69,8 +107,29 @@ jobs:
           Copy-Item target/${{ matrix.target }}/release/viewlume.exe dist/viewlume/
           Copy-Item README.md, LICENSE, CHANGELOG.md dist/viewlume/
           Compress-Archive -Path dist/viewlume -DestinationPath dist/${{ matrix.artifact }}.zip
-          $hash = (Get-FileHash dist/${{ matrix.artifact }}.zip -Algorithm SHA256).Hash.ToLower()
-          "$hash  ${{ matrix.artifact }}.zip" | Out-File -Encoding ascii dist/${{ matrix.artifact }}.zip.sha256
+          dotnet tool install --global wix
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          wix build packaging/windows/viewlume.wxs -arch x64 -d BinaryPath=target/${{ matrix.target }}/release/viewlume.exe -d ProductVersion=$version -o dist/${{ matrix.artifact }}.msi
+          if ($env:WINDOWS_CERTIFICATE_BASE64) {
+            & signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f certificate.pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD dist/${{ matrix.artifact }}.msi
+            Remove-Item certificate.pfx
+          }
+          Get-FileHash dist/${{ matrix.artifact }}.zip, dist/${{ matrix.artifact }}.msi -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } | Out-File -Encoding ascii dist/${{ matrix.artifact }}.sha256
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: target/${{ matrix.target }}/release
+          artifact-name: ${{ matrix.artifact }}.spdx.json
+          output-file: dist/${{ matrix.artifact }}.spdx.json
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/${{ matrix.artifact }}.*
 
       - uses: actions/upload-artifact@v4
         with:

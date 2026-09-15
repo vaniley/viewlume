@@ -1,4 +1,6 @@
-use crate::config::{DoubleClickAction, FilmstripVisibility, FilterMode, ViewerConfig, WindowMode};
+use crate::config::{
+    DoubleClickAction, FilmstripVisibility, FilterMode, Language, ViewerConfig, WindowMode,
+};
 use egui::{Context, Window};
 
 #[derive(Default)]
@@ -14,22 +16,43 @@ impl SettingsDialog {
 
         let mut config_changed = false;
         let mut open = self.is_open;
+        let mut should_close = false;
+        let ru = config.general.language.is_russian();
+        let tr = |english: &'static str, russian: &'static str| if ru { russian } else { english };
 
-        Window::new("Настройки")
+        Window::new(tr("Settings", "Настройки"))
             .open(&mut open)
             .resizable(true)
             .default_width(460.0)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::new(8.0, 10.0);
 
-                // --- 1. WINDOW SECTION ---
-                ui.heading("Window & Display");
+                ui.heading(tr("Language", "Язык"));
                 ui.horizontal(|ui| {
-                    ui.label("Default Mode:");
+                    ui.label(tr("Interface language:", "Язык интерфейса:"));
+                    for (language, label) in [
+                        (Language::Auto, tr("System", "Системный")),
+                        (Language::English, "English"),
+                        (Language::Russian, "Русский"),
+                    ] {
+                        if ui
+                            .selectable_value(&mut config.general.language, language, label)
+                            .clicked()
+                        {
+                            config_changed = true;
+                        }
+                    }
+                });
+                ui.separator();
+
+                // --- 1. WINDOW SECTION ---
+                ui.heading(tr("Window & Display", "Окно и экран"));
+                ui.horizontal(|ui| {
+                    ui.label(tr("Default mode:", "Режим по умолчанию:"));
                     if ui
                         .selectable_label(
                             config.window.mode == WindowMode::Overlay,
-                            "Fullscreen overlay",
+                            tr("Fullscreen overlay", "Полноэкранный оверлей"),
                         )
                         .clicked()
                     {
@@ -37,7 +60,10 @@ impl SettingsDialog {
                         config_changed = true;
                     }
                     if ui
-                        .selectable_label(config.window.mode == WindowMode::Windowed, "Windowed")
+                        .selectable_label(
+                            config.window.mode == WindowMode::Windowed,
+                            tr("Windowed", "Оконный"),
+                        )
                         .clicked()
                     {
                         config.window.mode = WindowMode::Windowed;
@@ -46,20 +72,26 @@ impl SettingsDialog {
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label("Double-click canvas:");
+                    ui.label(tr("Double-click canvas:", "Двойной клик:"));
                     egui::ComboBox::from_id_salt("double_click_action")
                         .selected_text(match config.window.double_click_action {
-                            DoubleClickAction::ToggleWindowMode => "Toggle Window / Overlay Mode",
-                            DoubleClickAction::ToggleFitToWindow => "Toggle Fit to Window",
-                            DoubleClickAction::ToggleActualSize => "Toggle 1:1 Actual Size",
-                            DoubleClickAction::None => "None",
+                            DoubleClickAction::ToggleWindowMode => {
+                                tr("Toggle window mode", "Переключать режим окна")
+                            }
+                            DoubleClickAction::ToggleFitToWindow => {
+                                tr("Toggle fit to window", "Вписывать в окно")
+                            }
+                            DoubleClickAction::ToggleActualSize => {
+                                tr("Toggle 1:1 actual size", "Масштаб 1:1")
+                            }
+                            DoubleClickAction::None => tr("None", "Нет"),
                         })
                         .show_ui(ui, |ui| {
                             if ui
                                 .selectable_value(
                                     &mut config.window.double_click_action,
                                     DoubleClickAction::ToggleWindowMode,
-                                    "Toggle Window / Overlay Mode",
+                                    tr("Toggle window mode", "Переключать режим окна"),
                                 )
                                 .clicked()
                             {
@@ -69,7 +101,7 @@ impl SettingsDialog {
                                 .selectable_value(
                                     &mut config.window.double_click_action,
                                     DoubleClickAction::ToggleFitToWindow,
-                                    "Toggle Fit to Window",
+                                    tr("Toggle fit to window", "Вписывать в окно"),
                                 )
                                 .clicked()
                             {
@@ -79,7 +111,7 @@ impl SettingsDialog {
                                 .selectable_value(
                                     &mut config.window.double_click_action,
                                     DoubleClickAction::ToggleActualSize,
-                                    "Toggle 1:1 Actual Size",
+                                    tr("Toggle 1:1 actual size", "Масштаб 1:1"),
                                 )
                                 .clicked()
                             {
@@ -89,7 +121,7 @@ impl SettingsDialog {
                                 .selectable_value(
                                     &mut config.window.double_click_action,
                                     DoubleClickAction::None,
-                                    "None",
+                                    tr("None", "Нет"),
                                 )
                                 .clicked()
                             {
@@ -101,7 +133,10 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.window.transparent_windowed_background,
-                        "Transparent background in windowed mode",
+                        tr(
+                            "Transparent background in windowed mode",
+                            "Прозрачный фон в оконном режиме",
+                        ),
                     )
                     .changed()
                 {
@@ -111,7 +146,10 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.window.show_checkerboard_for_transparent,
-                        "Show checkerboard background for transparent PNG/WebP",
+                        tr(
+                            "Show checkerboard for transparency",
+                            "Шахматный фон для прозрачности",
+                        ),
                     )
                     .changed()
                 {
@@ -121,7 +159,10 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.window.auto_hide_ui,
-                        "Auto-hide HUD and navigation chevrons on idle",
+                        tr(
+                            "Auto-hide controls when idle",
+                            "Скрывать элементы управления при бездействии",
+                        ),
                     )
                     .changed()
                 {
@@ -131,13 +172,13 @@ impl SettingsDialog {
                 ui.separator();
 
                 // --- 2. RENDERING & ZOOM SECTION ---
-                ui.heading("Rendering & Zoom");
+                ui.heading(tr("Rendering & Zoom", "Отображение и масштаб"));
                 ui.horizontal(|ui| {
-                    ui.label("Texture Filtering:");
+                    ui.label(tr("Texture filtering:", "Фильтрация:"));
                     if ui
                         .selectable_label(
                             config.rendering.filter_mode == FilterMode::Auto,
-                            "Auto (Crisp zoom)",
+                            tr("Auto", "Авто"),
                         )
                         .clicked()
                     {
@@ -147,7 +188,7 @@ impl SettingsDialog {
                     if ui
                         .selectable_label(
                             config.rendering.filter_mode == FilterMode::Nearest,
-                            "Nearest (Pixel art)",
+                            tr("Nearest (pixel art)", "Без сглаживания"),
                         )
                         .clicked()
                     {
@@ -157,7 +198,7 @@ impl SettingsDialog {
                     if ui
                         .selectable_label(
                             config.rendering.filter_mode == FilterMode::Bilinear,
-                            "Bilinear (Smooth)",
+                            tr("Bilinear (smooth)", "Билинейная"),
                         )
                         .clicked()
                     {
@@ -167,7 +208,7 @@ impl SettingsDialog {
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label("Zoom speed factor:");
+                    ui.label(tr("Zoom speed:", "Скорость масштаба:"));
                     if ui
                         .add(
                             egui::Slider::new(&mut config.rendering.zoom_factor, 1.05..=1.50)
@@ -182,7 +223,7 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.rendering.zoom_towards_cursor,
-                        "Zoom centered towards mouse cursor",
+                        tr("Zoom toward pointer", "Масштабировать к курсору"),
                     )
                     .changed()
                 {
@@ -191,7 +232,7 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.rendering.reverse_zoom_direction,
-                        "Invert mouse wheel zoom direction",
+                        tr("Invert mouse-wheel zoom", "Инвертировать колесо мыши"),
                     )
                     .changed()
                 {
@@ -200,7 +241,7 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.rendering.smooth_pan,
-                        "Короткая инерция перемещения",
+                        tr("Short panning inertia", "Короткая инерция перемещения"),
                     )
                     .changed()
                 {
@@ -209,7 +250,10 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.rendering.animate_image_transitions,
-                        "Анимация перелистывания изображений",
+                        tr(
+                            "Animate image changes",
+                            "Анимация перелистывания изображений",
+                        ),
                     )
                     .changed()
                 {
@@ -217,14 +261,14 @@ impl SettingsDialog {
                 }
                 ui.add_enabled_ui(config.rendering.animate_image_transitions, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Длительность перехода:");
+                        ui.label(tr("Transition duration:", "Длительность перехода:"));
                         if ui
                             .add(
                                 egui::Slider::new(
                                     &mut config.rendering.image_transition_ms,
                                     80.0..=500.0,
                                 )
-                                .suffix(" мс"),
+                                .suffix(tr(" ms", " мс")),
                             )
                             .changed()
                         {
@@ -236,11 +280,11 @@ impl SettingsDialog {
                 ui.separator();
 
                 // --- 3. NAVIGATION SECTION ---
-                ui.heading("Navigation & Controls");
+                ui.heading(tr("Navigation & Controls", "Навигация и управление"));
                 if ui
                     .checkbox(
                         &mut config.navigation.loop_folder,
-                        "Wrap around folder (loop last to first)",
+                        tr("Loop folder navigation", "Циклическая навигация по папке"),
                     )
                     .changed()
                 {
@@ -249,7 +293,10 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.navigation.edge_buttons_enabled,
-                        "Enable interactive screen edge chevrons (< and >)",
+                        tr(
+                            "Show edge navigation buttons",
+                            "Показывать кнопки навигации по краям",
+                        ),
                     )
                     .changed()
                 {
@@ -258,7 +305,10 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.navigation.animate_buttons,
-                        "Анимация кнопок перелистывания",
+                        tr(
+                            "Animate navigation buttons",
+                            "Анимация кнопок перелистывания",
+                        ),
                     )
                     .changed()
                 {
@@ -268,13 +318,13 @@ impl SettingsDialog {
                 ui.separator();
 
                 // --- 4. FILMSTRIP (BOTTOM GALLERY) SECTION ---
-                ui.heading("Bottom Filmstrip Gallery");
+                ui.heading(tr("Filmstrip", "Карусель"));
                 ui.horizontal(|ui| {
-                    ui.label("Visibility:");
+                    ui.label(tr("Visibility:", "Видимость:"));
                     if ui
                         .selectable_label(
                             config.filmstrip.visibility == FilmstripVisibility::Hover,
-                            "Hover (Auto-show)",
+                            tr("On hover", "При наведении"),
                         )
                         .clicked()
                     {
@@ -284,7 +334,7 @@ impl SettingsDialog {
                     if ui
                         .selectable_label(
                             config.filmstrip.visibility == FilmstripVisibility::Always,
-                            "Always Visible",
+                            tr("Always", "Всегда"),
                         )
                         .clicked()
                     {
@@ -294,7 +344,7 @@ impl SettingsDialog {
                     if ui
                         .selectable_label(
                             config.filmstrip.visibility == FilmstripVisibility::Hidden,
-                            "Hidden",
+                            tr("Hidden", "Скрыта"),
                         )
                         .clicked()
                     {
@@ -304,7 +354,7 @@ impl SettingsDialog {
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label("Thumbnail size (px):");
+                    ui.label(tr("Thumbnail size (px):", "Размер миниатюр (пкс):"));
                     if ui
                         .add(egui::Slider::new(
                             &mut config.filmstrip.thumbnail_size,
@@ -319,7 +369,10 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.filmstrip.auto_scroll_to_active,
-                        "Auto-scroll filmstrip to active image",
+                        tr(
+                            "Scroll to active image",
+                            "Прокручивать к активному изображению",
+                        ),
                     )
                     .changed()
                 {
@@ -328,7 +381,10 @@ impl SettingsDialog {
                 if ui
                     .checkbox(
                         &mut config.filmstrip.coverflow_effect,
-                        "Увеличивать превью ближе к центру",
+                        tr(
+                            "Enlarge thumbnails near center",
+                            "Увеличивать превью ближе к центру",
+                        ),
                     )
                     .changed()
                 {
@@ -338,9 +394,9 @@ impl SettingsDialog {
                 ui.separator();
 
                 // --- 5. CACHE & PERFORMANCE SECTION ---
-                ui.heading("Cache & Preloading");
+                ui.heading(tr("Cache & Preloading", "Кеш и предзагрузка"));
                 ui.horizontal(|ui| {
-                    ui.label("RAM Cache Limit (MB):");
+                    ui.label(tr("RAM cache limit (MB):", "Лимит RAM-кеша (МБ):"));
                     if ui
                         .add(
                             egui::Slider::new(&mut config.cache.max_ram_cache_mb, 256..=4096)
@@ -352,7 +408,7 @@ impl SettingsDialog {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Prefetch adjacent images:");
+                    ui.label(tr("Prefetch adjacent images:", "Предзагружать соседние:"));
                     if ui
                         .add(egui::Slider::new(&mut config.cache.prefetch_count, 0..=6))
                         .changed()
@@ -365,24 +421,24 @@ impl SettingsDialog {
 
                 // Footer buttons
                 ui.horizontal(|ui| {
-                    if ui.button("Сохранить").clicked() {
+                    if ui.button(tr("Save", "Сохранить")).clicked() {
                         let _ = config.save();
-                        self.is_open = false;
+                        should_close = true;
                     }
 
-                    if ui.button("Сбросить").clicked() {
+                    if ui.button(tr("Reset", "Сбросить")).clicked() {
                         *config = ViewerConfig::default();
                         let _ = config.save();
                         config_changed = true;
                     }
 
-                    if ui.button("Закрыть").clicked() {
-                        self.is_open = false;
+                    if ui.button(tr("Close", "Закрыть")).clicked() {
+                        should_close = true;
                     }
                 });
             });
 
-        self.is_open = open;
+        self.is_open = open && !should_close;
         config_changed
     }
 }
