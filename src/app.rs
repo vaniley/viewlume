@@ -12,7 +12,9 @@ use crate::config::{DoubleClickAction, FilterMode, ViewerConfig, WindowMode};
 use crate::filmstrip::{render_filmstrip, FilmstripState, ScrollNav};
 use crate::loader::decoder::DecodedImage;
 use crate::loader::pipeline::{LoadResult, LoaderPipeline, Priority};
-use crate::navigation::{render_edge_chevrons, FolderNavigator, FolderScan, NavAction};
+use crate::navigation::{
+    render_edge_chevrons, FolderNavigator, FolderScan, NavAction, SUPPORTED_IMAGE_EXTENSIONS,
+};
 use crate::settings_dialog::SettingsDialog;
 
 #[derive(Clone, Copy)]
@@ -674,10 +676,7 @@ impl ImageViewerApp {
         }
         if o_pressed {
             if let Some(file) = rfd::FileDialog::new()
-                .add_filter(
-                    "Images",
-                    &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "qoi"],
-                )
+                .add_filter("Images", SUPPORTED_IMAGE_EXTENSIONS)
                 .pick_file()
             {
                 self.open_target(&file, ctx);
@@ -926,10 +925,7 @@ impl eframe::App for ImageViewerApp {
                         self.ui_opacity,
                     ) {
                         if let Some(file) = rfd::FileDialog::new()
-                            .add_filter(
-                                "Images",
-                                &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "qoi"],
-                            )
+                            .add_filter("Images", SUPPORTED_IMAGE_EXTENSIONS)
                             .pick_file()
                         {
                             self.open_target(&file, ctx);

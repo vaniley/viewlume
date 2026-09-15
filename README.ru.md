@@ -24,7 +24,8 @@ Viewlume — быстрый просмотрщик изображений с GPU
 
 ## Поддерживаемые форматы
 
-JPEG, PNG, WebP, BMP, TIFF, QOI и первый кадр GIF.
+JPEG/JFIF, PNG, WebP, GIF (первый кадр), BMP, TIFF, QOI, ICO, TGA, DDS,
+OpenEXR, Radiance HDR, Farbfeld и PNM (PBM/PGM/PPM/PAM).
 
 ## Установка
 

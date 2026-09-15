@@ -24,7 +24,8 @@ Viewlume is a fast, GPU-accelerated image viewer for Linux and Windows. It keeps
 
 ## Supported formats
 
-JPEG, PNG, WebP, BMP, TIFF, QOI, and the first frame of GIF images.
+JPEG/JFIF, PNG, WebP, GIF (first frame), BMP, TIFF, QOI, ICO, TGA, DDS,
+OpenEXR, Radiance HDR, Farbfeld, and PNM (PBM/PGM/PPM/PAM).
 
 ## Install
 

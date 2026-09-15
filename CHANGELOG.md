@@ -13,7 +13,8 @@ All notable changes to Viewlume are documented in this file. The project follows
 - Keyboard, edge-button, and thumbnail-carousel navigation.
 - Virtualized cover-flow carousel with background thumbnail loading.
 - RAM caching and adjacent-image prefetching.
-- JPEG, PNG, WebP, GIF, BMP, TIFF, and QOI decoding.
+- JPEG/JFIF, PNG, WebP, GIF, BMP, TIFF, QOI, ICO, TGA, DDS, OpenEXR,
+  Radiance HDR, Farbfeld, and PNM decoding.
 - EXIF orientation handling and natural filename sorting.
 - Persistent settings with migration from the former application name.
 

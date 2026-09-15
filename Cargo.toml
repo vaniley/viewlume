@@ -29,7 +29,14 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
     "gif",
     "bmp",
+    "dds",
+    "exr",
+    "ff",
+    "hdr",
+    "ico",
+    "pnm",
     "tiff",
+    "tga",
     "qoi",
 ] }
 fast_image_resize = { version = "5", features = ["rayon"] }

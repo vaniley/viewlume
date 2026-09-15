@@ -30,7 +30,8 @@ fn decode_oriented_image(path: &Path) -> Result<DynamicImage, String> {
     let file_bytes = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
     let orientation = read_exif_orientation(&file_bytes);
 
-    // Fast image decoding for PNG, JPEG, WebP, GIF, BMP, TIFF, QOI
+    // Decode static formats from memory so EXIF orientation can be read from
+    // the same byte buffer without a second filesystem read.
     let dyn_img = image::load_from_memory(&file_bytes)
         .map_err(|e| format!("Failed to decode image: {}", e))?;
 

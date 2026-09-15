@@ -3,6 +3,11 @@ use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &[
+    "bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jfif", "jpe", "jpeg", "jpg", "pam", "pbm",
+    "pgm", "png", "pnm", "ppm", "qoi", "tga", "tif", "tiff", "webp",
+];
+
 #[derive(Default)]
 pub struct FolderNavigator {
     pub files: Vec<PathBuf>,
@@ -18,14 +23,13 @@ pub struct FolderScan {
 
 impl FolderNavigator {
     pub fn is_supported_image(path: &Path) -> bool {
-        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tiff" | "tif" | "qoi"
-            )
-        } else {
-            false
-        }
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                SUPPORTED_IMAGE_EXTENSIONS
+                    .iter()
+                    .any(|supported| extension.eq_ignore_ascii_case(supported))
+            })
     }
 
     pub fn scan(target_path: &Path) -> FolderScan {
@@ -262,5 +266,19 @@ mod tests {
         assert_eq!(navigator.current_path(), Some(&target));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recognizes_all_supported_extensions_case_insensitively() {
+        for extension in SUPPORTED_IMAGE_EXTENSIONS {
+            assert!(FolderNavigator::is_supported_image(Path::new(&format!(
+                "image.{extension}"
+            ))));
+            assert!(FolderNavigator::is_supported_image(Path::new(&format!(
+                "image.{}",
+                extension.to_ascii_uppercase()
+            ))));
+        }
+        assert!(!FolderNavigator::is_supported_image(Path::new("notes.txt")));
     }
 }
