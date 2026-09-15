@@ -100,6 +100,16 @@ impl SettingsDialog {
 
                 if ui
                     .checkbox(
+                        &mut config.window.transparent_windowed_background,
+                        "Transparent background in windowed mode",
+                    )
+                    .changed()
+                {
+                    config_changed = true;
+                }
+
+                if ui
+                    .checkbox(
                         &mut config.window.show_checkerboard_for_transparent,
                         "Show checkerboard background for transparent PNG/WebP",
                     )

@@ -13,6 +13,7 @@ pub struct FilmstripState {
     thumb_lru: VecDeque<PathBuf>,
     pub hover_anim: f32,
     last_scrolled_index: Option<usize>,
+    first_reveal: bool,
 }
 
 impl Default for FilmstripState {
@@ -22,6 +23,7 @@ impl Default for FilmstripState {
             thumb_lru: VecDeque::new(),
             hover_anim: 0.0,
             last_scrolled_index: None,
+            first_reveal: true,
         }
     }
 }
@@ -113,11 +115,24 @@ pub fn render_filmstrip(
     let side_padding = (strip_rect.width() * 0.5 - base_size * 0.5).max(0.0);
     let total_width = side_padding * 2.0 + files.len() as f32 * stride - gap;
 
+    // Pre-request thumbnails around the active image so they're already loading
+    // (or cached) before the carousel viewport renders them.
+    let prefetch_radius = ((strip_rect.width() / stride).ceil() as usize).max(8);
+    let pre_first = current_index.saturating_sub(prefetch_radius);
+    let pre_last = (current_index + prefetch_radius + 1).min(files.len());
+    for (idx, path) in files.iter().enumerate().take(pre_last).skip(pre_first) {
+        pipeline.request_thumbnail(path.clone(), idx, cfg.thumbnail_size);
+    }
+
+    // On first reveal, disable scroll animation so the carousel appears
+    // already centered on the active thumbnail instead of visibly scrolling.
+    let use_animated = !state.first_reveal;
+
     ScrollArea::horizontal()
         .id_salt("filmstrip-scroll")
         .auto_shrink([false, false])
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-        .animated(true)
+        .animated(use_animated)
         .show_viewport(&mut child, |ui, visible| {
             ui.set_width(total_width.max(visible.width()));
             ui.set_height(strip_height);
@@ -133,6 +148,7 @@ pub fn render_filmstrip(
                 );
                 ui.scroll_to_rect(target_rect, Some(egui::Align::Center));
                 state.last_scrolled_index = Some(current_index);
+                state.first_reveal = false;
             }
 
             // `visible` is content-relative. Mixing it with absolute coordinates caused
@@ -164,9 +180,14 @@ pub fn render_filmstrip(
                     1.0
                 };
                 let draw_size = base_size * scale;
+                let drop_offset = if cfg.coverflow_effect {
+                    (1.0 - scale) * base_size * 0.4
+                } else {
+                    0.0
+                };
                 let center = Pos2::new(
                     origin.x + slot_center_x,
-                    origin.y + strip_height * 0.5 - 3.0,
+                    origin.y + strip_height * 0.5 - 3.0 + drop_offset,
                 );
                 let hit_rect = Rect::from_center_size(center, Vec2::splat(base_size));
                 let mut response = ui.interact(hit_rect, ui.id().with(idx), Sense::click());
@@ -274,5 +295,6 @@ impl FilmstripState {
         self.thumb_textures.clear();
         self.thumb_lru.clear();
         self.last_scrolled_index = None;
+        self.first_reveal = true;
     }
 }

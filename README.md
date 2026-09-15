@@ -7,6 +7,10 @@
 
 Viewlume is a fast, GPU-accelerated image viewer for Linux and Windows. It keeps the image in focus with a transparent fullscreen mode, fluid zoom and pan, keyboard navigation, and a lightweight thumbnail carousel.
 
+## Demo
+
+<video src="docs/demo.webm" controls width="100%"></video>
+
 ## Highlights
 
 - GPU rendering through `egui`, `eframe`, and `wgpu`.

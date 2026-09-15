@@ -10,6 +10,12 @@ pub struct FolderNavigator {
     pub current_dir: Option<PathBuf>,
 }
 
+pub struct FolderScan {
+    files: Vec<PathBuf>,
+    current_index: usize,
+    current_dir: PathBuf,
+}
+
 impl FolderNavigator {
     pub fn is_supported_image(path: &Path) -> bool {
         if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
@@ -22,7 +28,7 @@ impl FolderNavigator {
         }
     }
 
-    pub fn scan_directory(&mut self, target_path: &Path) {
+    pub fn scan(target_path: &Path) -> FolderScan {
         let (dir, target_file) = if target_path.is_dir() {
             (target_path.to_path_buf(), None)
         } else {
@@ -33,40 +39,55 @@ impl FolderNavigator {
             (parent, Some(target_path.to_path_buf()))
         };
 
-        self.current_dir = Some(dir.clone());
-        self.files.clear();
-
-        if let Ok(entries) = fs::read_dir(&dir) {
-            let mut found_files: Vec<PathBuf> = entries
+        let files = if let Ok(entries) = fs::read_dir(&dir) {
+            let mut files: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok().map(|entry| entry.path()))
                 .filter(|p| p.is_file() && Self::is_supported_image(p))
                 .collect();
 
             // Natural sort order: image1, image2, image10
-            found_files.sort_by(|a, b| {
+            files.sort_by(|a, b| {
                 let name_a = a.file_name().unwrap_or_default().to_string_lossy();
                 let name_b = b.file_name().unwrap_or_default().to_string_lossy();
                 natord::compare(&name_a, &name_b)
             });
 
-            self.files = found_files;
-        }
+            files
+        } else {
+            Vec::new()
+        };
 
         // Set current index
-        if let Some(target) = target_file {
-            let target_canon = fs::canonicalize(&target).unwrap_or(target);
-            if let Some(idx) = self
-                .files
+        let current_index = if let Some(target) = target_file {
+            files
                 .iter()
-                .position(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == target_canon)
-            {
-                self.current_index = idx;
-            } else {
-                self.current_index = 0;
-            }
+                .position(|path| path == &target)
+                .or_else(|| {
+                    let target_canon = fs::canonicalize(&target).ok()?;
+                    files.iter().position(|path| {
+                        fs::canonicalize(path).is_ok_and(|candidate| candidate == target_canon)
+                    })
+                })
+                .unwrap_or(0)
         } else {
-            self.current_index = 0;
+            0
+        };
+
+        FolderScan {
+            files,
+            current_index,
+            current_dir: dir,
         }
+    }
+
+    pub fn apply_scan(&mut self, scan: FolderScan) {
+        self.files = scan.files;
+        self.current_index = scan.current_index;
+        self.current_dir = Some(scan.current_dir);
+    }
+
+    pub fn scan_directory(&mut self, target_path: &Path) {
+        self.apply_scan(Self::scan(target_path));
     }
 
     pub fn current_path(&self) -> Option<&PathBuf> {
@@ -213,4 +234,33 @@ pub fn render_edge_chevrons(
     painter.line_segment([r_p2, r_p3], right_stroke);
 
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_naturally_sorts_files_and_selects_the_target() {
+        let dir =
+            std::env::temp_dir().join(format!("viewlume-folder-scan-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scan fixture directory");
+        for name in ["image10.png", "image2.png", "image1.png", "notes.txt"] {
+            std::fs::write(dir.join(name), []).expect("create scan fixture");
+        }
+
+        let target = dir.join("image2.png");
+        let mut navigator = FolderNavigator::default();
+        navigator.apply_scan(FolderNavigator::scan(&target));
+
+        let names: Vec<_> = navigator
+            .files
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect();
+        assert_eq!(names, ["image1.png", "image2.png", "image10.png"]);
+        assert_eq!(navigator.current_path(), Some(&target));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

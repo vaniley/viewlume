@@ -48,6 +48,7 @@ pub struct WindowConfig {
     pub mode: WindowMode,
     pub double_click_action: DoubleClickAction,
     pub bg_color: [u8; 4],
+    pub transparent_windowed_background: bool,
     pub show_checkerboard_for_transparent: bool,
     pub auto_hide_ui: bool,
     pub ui_fade_timeout_secs: f32,
@@ -60,6 +61,7 @@ impl Default for WindowConfig {
             mode: WindowMode::Overlay,
             double_click_action: DoubleClickAction::ToggleWindowMode,
             bg_color: [14, 14, 16, 180], // Dark overlay, semi-transparent in overlay mode
+            transparent_windowed_background: true,
             show_checkerboard_for_transparent: true,
             auto_hide_ui: true,
             ui_fade_timeout_secs: 2.0,

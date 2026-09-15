@@ -1,7 +1,10 @@
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Vec2, ViewportCommand};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::cache::ImageCache;
 use crate::canvas::{render_canvas, CanvasState};
@@ -9,7 +12,7 @@ use crate::config::{DoubleClickAction, FilterMode, ViewerConfig, WindowMode};
 use crate::filmstrip::{render_filmstrip, FilmstripState, ScrollNav};
 use crate::loader::decoder::DecodedImage;
 use crate::loader::pipeline::{LoadResult, LoaderPipeline, Priority};
-use crate::navigation::{render_edge_chevrons, FolderNavigator, NavAction};
+use crate::navigation::{render_edge_chevrons, FolderNavigator, FolderScan, NavAction};
 use crate::settings_dialog::SettingsDialog;
 
 #[derive(Clone, Copy)]
@@ -101,6 +104,53 @@ fn icon_button(
     response.clicked()
 }
 
+struct ScanResult {
+    generation: u64,
+    scan: FolderScan,
+}
+
+#[derive(Default)]
+struct NavigationPace {
+    last_navigation: Option<Instant>,
+    direction: i8,
+    streak: usize,
+}
+
+impl NavigationPace {
+    fn record(&mut self, direction: i8) {
+        self.record_at(direction, Instant::now());
+    }
+
+    fn record_at(&mut self, direction: i8, now: Instant) {
+        let interval = self
+            .last_navigation
+            .and_then(|previous| now.checked_duration_since(previous));
+        self.streak = match (self.direction == direction, interval) {
+            (true, Some(duration)) if duration <= Duration::from_millis(160) => {
+                (self.streak + 2).min(6)
+            }
+            (true, Some(duration)) if duration <= Duration::from_millis(360) => {
+                (self.streak + 1).min(6)
+            }
+            _ => 0,
+        };
+        self.direction = direction;
+        self.last_navigation = Some(now);
+    }
+
+    fn prefetch_counts(&self, base: usize) -> (usize, usize) {
+        match self.direction {
+            1 if self.streak > 0 => (base + self.streak, base.min(1)),
+            -1 if self.streak > 0 => (base.min(1), base + self.streak),
+            _ => (base, base),
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub struct ImageViewerApp {
     pub config: ViewerConfig,
     pub cache: Arc<ImageCache>,
@@ -111,6 +161,8 @@ pub struct ImageViewerApp {
     pub settings_dialog: SettingsDialog,
 
     pub current_image: Option<Arc<DecodedImage>>,
+    current_image_path: Option<PathBuf>,
+    current_image_is_preview: bool,
     texture_dirty: bool,
     pub is_loading: bool,
     pub load_error: Option<String>,
@@ -120,6 +172,13 @@ pub struct ImageViewerApp {
     pub ui_opacity: f32,
     pub show_info_badge: bool,
     pub status_message: Option<(String, Instant)>,
+
+    scan_result_tx: Sender<ScanResult>,
+    scan_result_rx: Receiver<ScanResult>,
+    scan_generation: u64,
+    pending_open_path: Option<PathBuf>,
+    navigation_pace: NavigationPace,
+    pending_load_results: VecDeque<LoadResult>,
 }
 
 impl ImageViewerApp {
@@ -147,6 +206,7 @@ impl ImageViewerApp {
             cc.egui_ctx.clone(),
             config.filmstrip.thumbnail_size,
         );
+        let (scan_result_tx, scan_result_rx) = unbounded();
 
         let mut app = Self {
             window_mode: config.window.mode,
@@ -159,6 +219,8 @@ impl ImageViewerApp {
             settings_dialog: SettingsDialog::default(),
 
             current_image: None,
+            current_image_path: None,
+            current_image_is_preview: false,
             texture_dirty: false,
             is_loading: false,
             load_error: None,
@@ -167,24 +229,86 @@ impl ImageViewerApp {
             ui_opacity: 1.0,
             show_info_badge: true,
             status_message: None,
+
+            scan_result_tx,
+            scan_result_rx,
+            scan_generation: 0,
+            pending_open_path: None,
+            navigation_pace: NavigationPace::default(),
+            pending_load_results: VecDeque::new(),
         };
 
         if let Some(target) = initial_target {
-            app.open_target(&target);
+            app.open_target(&target, &cc.egui_ctx);
         }
 
         app
     }
 
-    pub fn open_target(&mut self, path: &Path) {
-        self.navigator.scan_directory(path);
+    pub fn open_target(&mut self, path: &Path, ctx: &Context) {
+        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        let generation = self.scan_generation;
+        let sender = self.scan_result_tx.clone();
+        let repaint = ctx.clone();
+        let scan_target = target.clone();
+        let _ = thread::Builder::new()
+            .name("folder-scan".to_string())
+            .spawn(move || {
+                let scan = FolderNavigator::scan(&scan_target);
+                let _ = sender.send(ScanResult { generation, scan });
+                repaint.request_repaint();
+            });
+
+        self.navigation_pace.reset();
+        self.pipeline.next_epoch();
+        self.load_error = None;
+        self.is_loading = true;
+        self.navigator = FolderNavigator::default();
         self.filmstrip_state.clear();
-        self.load_current_image(true);
+
+        // Decode an explicitly opened file immediately, in parallel with its folder scan.
+        if target.is_file() && FolderNavigator::is_supported_image(&target) {
+            self.canvas_state
+                .prepare_image_change(self.current_image.as_deref());
+            self.is_loading = true;
+            self.pending_open_path = Some(target.clone());
+            let priority = if self.current_image.is_none() {
+                Priority::ImmediateWithPreview
+            } else {
+                Priority::Immediate
+            };
+            self.pipeline
+                .request_full_image(target, usize::MAX, priority);
+        } else {
+            self.pending_open_path = None;
+        }
+    }
+
+    fn process_scan_results(&mut self) {
+        while let Ok(result) = self.scan_result_rx.try_recv() {
+            if result.generation != self.scan_generation {
+                continue;
+            }
+            self.navigator.apply_scan(result.scan);
+            self.filmstrip_state.clear();
+
+            let current_path = self.navigator.current_path();
+            if current_path.is_some() && current_path == self.pending_open_path.as_ref() {
+                // The explicitly opened file is already decoding in parallel.
+            } else if current_path.is_some() && current_path == self.current_image_path.as_ref() {
+                self.is_loading = false;
+                self.prefetch_adjacent();
+            } else {
+                self.load_current_image(true);
+            }
+        }
     }
 
     pub fn load_current_image(&mut self, reset_view: bool) {
         if let Some(path) = self.navigator.current_path().cloned() {
             self.pipeline.next_epoch();
+            self.pending_open_path = None;
             self.load_error = None;
 
             if reset_view {
@@ -195,20 +319,30 @@ impl ImageViewerApp {
             // Check if already in cache
             if let Some(cached) = self.cache.get_full(&path) {
                 self.current_image = Some(Arc::clone(&cached));
+                self.current_image_path = Some(path);
+                self.current_image_is_preview = false;
                 self.texture_dirty = true;
                 self.is_loading = false;
                 self.prefetch_adjacent();
             } else {
                 self.is_loading = true;
+                let priority = if self.current_image.is_none() {
+                    Priority::ImmediateWithPreview
+                } else {
+                    Priority::Immediate
+                };
                 // Request immediate load
                 self.pipeline.request_full_image(
                     path.clone(),
                     self.navigator.current_index,
-                    Priority::Immediate,
+                    priority,
                 );
             }
         } else {
+            self.pending_open_path = None;
             self.current_image = None;
+            self.current_image_path = None;
+            self.current_image_is_preview = false;
             self.is_loading = false;
         }
     }
@@ -220,14 +354,17 @@ impl ImageViewerApp {
         }
 
         let cur = self.navigator.current_index;
-        let count = self.config.cache.prefetch_count.min(total - 1);
+        let base_count = self.config.cache.prefetch_count.min(total - 1);
+        let (forward_count, backward_count) = self.navigation_pace.prefetch_counts(base_count);
         let wrap = self.config.navigation.loop_folder;
 
-        let mut seen = Vec::with_capacity(count * 2);
+        let mut seen = Vec::with_capacity(forward_count + backward_count);
 
-        for offset in 1..=count {
+        for offset in 1..=forward_count.max(backward_count) {
             // Forward
-            let fwd_idx = if cur + offset < total {
+            let fwd_idx = if offset > forward_count {
+                None
+            } else if cur + offset < total {
                 Some(cur + offset)
             } else if wrap {
                 Some((cur + offset) % total)
@@ -245,7 +382,9 @@ impl ImageViewerApp {
             }
 
             // Backward — use wrapping subtraction to avoid underflow
-            let bwd_idx = if cur >= offset {
+            let bwd_idx = if offset > backward_count {
+                None
+            } else if cur >= offset {
                 Some(cur - offset)
             } else if wrap {
                 Some(total - offset + cur)
@@ -270,6 +409,7 @@ impl ImageViewerApp {
             .next(self.config.navigation.loop_folder)
             .is_some()
         {
+            self.navigation_pace.record(1);
             self.canvas_state.set_transition_direction(1.0);
             self.load_current_image(true);
             self.reset_activity();
@@ -282,6 +422,7 @@ impl ImageViewerApp {
             .prev(self.config.navigation.loop_folder)
             .is_some()
         {
+            self.navigation_pace.record(-1);
             self.canvas_state.set_transition_direction(-1.0);
             self.load_current_image(true);
             self.reset_activity();
@@ -289,12 +430,16 @@ impl ImageViewerApp {
     }
 
     pub fn jump_to(&mut self, index: usize) {
+        if index == self.navigator.current_index {
+            return;
+        }
         let direction = if index < self.navigator.current_index {
             -1.0
         } else {
             1.0
         };
         if self.navigator.jump_to(index).is_some() {
+            self.navigation_pace.record(direction as i8);
             self.canvas_state.set_transition_direction(direction);
             self.load_current_image(true);
             self.reset_activity();
@@ -333,8 +478,47 @@ impl ImageViewerApp {
         const MAX_THUMB_UPLOADS_PER_FRAME: usize = 8;
         let mut thumb_uploads = 0;
 
-        while let Some(res) = self.pipeline.try_recv_result() {
+        while let Some(res) = self
+            .pending_load_results
+            .pop_front()
+            .or_else(|| self.pipeline.try_recv_result())
+        {
             match res {
+                LoadResult::Preview {
+                    path,
+                    index,
+                    epoch,
+                    width,
+                    height,
+                    image,
+                } => {
+                    let matches_navigator = self.navigator.current_path() == Some(&path)
+                        && self.navigator.current_index == index;
+                    let matches_pending = self.pending_open_path.as_ref() == Some(&path);
+                    if epoch == self.pipeline.current_epoch()
+                        && (matches_navigator || matches_pending)
+                        && self.current_image.is_none()
+                    {
+                        let preview = Arc::new(DecodedImage {
+                            width,
+                            height,
+                            bytes_size: image.as_raw().len() * std::mem::size_of::<Color32>(),
+                            color_image: image,
+                        });
+                        self.canvas_state.update_texture(
+                            ctx,
+                            &preview,
+                            self.config.rendering.filter_mode,
+                            true,
+                            false,
+                        );
+                        self.current_image = Some(preview);
+                        self.current_image_path = Some(path);
+                        self.current_image_is_preview = true;
+                        self.texture_dirty = false;
+                        ctx.request_repaint();
+                    }
+                }
                 LoadResult::FullImage {
                     path,
                     index,
@@ -344,29 +528,44 @@ impl ImageViewerApp {
                     let cur_idx = self.navigator.current_index;
                     let cur_path = self.navigator.current_path();
 
-                    // Only update active image if it matches current index & path & epoch
+                    let matches_navigator = Some(&path) == cur_path && index == cur_idx;
+                    let matches_pending = self.pending_open_path.as_ref() == Some(&path);
+
+                    // Only update active image if it still matches the latest open/navigation.
                     if epoch == self.pipeline.current_epoch()
-                        && Some(&path) == cur_path
-                        && index == cur_idx
+                        && (matches_navigator || matches_pending)
                     {
                         self.is_loading = false;
                         match result {
                             Ok(img) => {
+                                let replacing_preview = self.current_image_is_preview
+                                    && self.current_image_path.as_ref() == Some(&path);
                                 self.canvas_state.update_texture(
                                     ctx,
                                     &img,
                                     self.config.rendering.filter_mode,
-                                    true,
-                                    self.config.rendering.animate_image_transitions,
+                                    !replacing_preview,
+                                    !replacing_preview
+                                        && self.config.rendering.animate_image_transitions,
                                 );
                                 self.current_image = Some(img);
+                                self.current_image_path = Some(path.clone());
+                                self.current_image_is_preview = false;
                                 self.texture_dirty = false;
                                 self.load_error = None;
+                                if matches_pending {
+                                    self.pending_open_path = None;
+                                }
                                 self.prefetch_adjacent();
                             }
                             Err(e) => {
                                 self.load_error = Some(e);
                                 self.current_image = None;
+                                self.current_image_path = Some(path.clone());
+                                self.current_image_is_preview = false;
+                                if matches_pending {
+                                    self.pending_open_path = None;
+                                }
                             }
                         }
                         ctx.request_repaint();
@@ -378,8 +577,13 @@ impl ImageViewerApp {
                     result,
                 } => {
                     if thumb_uploads >= MAX_THUMB_UPLOADS_PER_FRAME {
+                        self.pending_load_results.push_front(LoadResult::Thumbnail {
+                            path,
+                            index,
+                            result,
+                        });
                         ctx.request_repaint();
-                        continue;
+                        break;
                     }
                     if self.navigator.files.get(index) == Some(&path) {
                         if let Ok(thumb) = result {
@@ -476,7 +680,7 @@ impl ImageViewerApp {
                 )
                 .pick_file()
             {
-                self.open_target(&file);
+                self.open_target(&file, ctx);
             }
         }
         if s_pressed {
@@ -527,7 +731,7 @@ impl ImageViewerApp {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
             if let Some(path) = file.path {
-                self.open_target(&path);
+                self.open_target(&path, ctx);
                 break;
             }
         }
@@ -579,6 +783,7 @@ impl eframe::App for ImageViewerApp {
         let cursor_pos = ctx.input(|i| i.pointer.hover_pos());
 
         // Process async worker responses
+        self.process_scan_results();
         self.process_incoming_results(ctx);
         if self.texture_dirty {
             if let Some(image) = self.current_image.as_ref() {
@@ -601,8 +806,10 @@ impl eframe::App for ImageViewerApp {
         self.update_ui_fade(ctx, cursor_pos, dt);
 
         // Draw background — overlay uses semi-transparent dark for see-through darkening,
-        // windowed is fully opaque.
-        let bg_color = if self.window_mode == WindowMode::Overlay {
+        // windowed respects transparent_windowed_background config.
+        let bg_color = if self.window_mode == WindowMode::Overlay
+            || self.config.window.transparent_windowed_background
+        {
             let c = self.config.window.bg_color;
             Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
         } else {
@@ -637,6 +844,7 @@ impl eframe::App for ImageViewerApp {
                     &self.config.rendering,
                     self.config.window.show_checkerboard_for_transparent,
                     !pointer_over_filmstrip,
+                    !self.is_loading && self.load_error.is_none(),
                 );
 
                 // Double-click on canvas action
@@ -724,7 +932,7 @@ impl eframe::App for ImageViewerApp {
                             )
                             .pick_file()
                         {
-                            self.open_target(&file);
+                            self.open_target(&file, ctx);
                         }
                     }
                     if icon_button(
@@ -819,18 +1027,8 @@ impl eframe::App for ImageViewerApp {
                     }
                 }
 
-                // 6. Loading Spinner or Error Banner
-                if self.is_loading {
-                    let spinner_rect = Rect::from_center_size(viewport.center(), Vec2::splat(40.0));
-                    ui.allocate_rect(spinner_rect, egui::Sense::hover());
-                    ui.painter().text(
-                        viewport.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "Loading...",
-                        egui::FontId::proportional(16.0),
-                        Color32::WHITE,
-                    );
-                } else if let Some(ref err) = self.load_error {
+                // 6. Keep loading silent; only surface an actual error.
+                if let Some(ref err) = self.load_error {
                     ui.painter().text(
                         viewport.center(),
                         egui::Align2::CENTER_CENTER,
@@ -884,5 +1082,27 @@ impl eframe::App for ImageViewerApp {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rapid_navigation_expands_prefetch_in_travel_direction() {
+        let start = Instant::now();
+        let mut pace = NavigationPace::default();
+        pace.record_at(1, start);
+        assert_eq!(pace.prefetch_counts(2), (2, 2));
+
+        pace.record_at(1, start + Duration::from_millis(120));
+        assert_eq!(pace.prefetch_counts(2), (4, 1));
+
+        pace.record_at(1, start + Duration::from_millis(220));
+        assert_eq!(pace.prefetch_counts(2), (6, 1));
+
+        pace.record_at(-1, start + Duration::from_millis(300));
+        assert_eq!(pace.prefetch_counts(2), (2, 2));
     }
 }

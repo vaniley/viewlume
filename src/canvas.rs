@@ -184,6 +184,17 @@ impl CanvasState {
         self.current_filter = filter_mode;
     }
 
+    pub fn sync_texture_options(&mut self, image: Option<&Arc<DecodedImage>>) {
+        if self.current_filter == FilterMode::Auto {
+            let options = Self::get_texture_options(self.current_filter, self.target_scale);
+            if let Some(texture) = self.texture.as_mut() {
+                if let Some(image) = image {
+                    texture.set(image.color_image.clone(), options);
+                }
+            }
+        }
+    }
+
     fn animate(&mut self, dt: f32, cfg: &RenderingConfig) -> bool {
         let mut moving = false;
         let zoom_blend = 1.0 - (-24.0 * dt).exp();
@@ -238,6 +249,7 @@ pub fn render_canvas(
     render_cfg: &RenderingConfig,
     show_checkerboard: bool,
     allow_wheel_zoom: bool,
+    show_empty_hint: bool,
 ) -> CanvasResponse {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -247,6 +259,7 @@ pub fn render_canvas(
     if let Some(image) = current_image {
         if !state.initialized {
             state.initialize_image(image.width as f32, image.height as f32, rect, render_cfg);
+            state.sync_texture_options(current_image);
         }
     }
 
@@ -268,6 +281,7 @@ pub fn render_canvas(
                     mouse - (mouse - state.target_pan) * (new_target / old_target) as f32;
             }
             state.target_scale = new_target;
+            state.sync_texture_options(current_image);
         }
     }
 
@@ -349,7 +363,7 @@ pub fn render_canvas(
                 Color32::from_white_alpha((transition * 255.0) as u8),
             );
         }
-    } else {
+    } else if show_empty_hint {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -403,5 +417,14 @@ mod tests {
         let new_center = state.target_pan + Vec2::splat(new_extent * 0.5);
         assert!((old_extent - new_extent).abs() < 0.01);
         assert!((old_center - new_center).length() < 0.01);
+    }
+
+    #[test]
+    fn texture_options_auto_mode() {
+        let opts_scaled_up = CanvasState::get_texture_options(FilterMode::Auto, 2.0);
+        assert_eq!(opts_scaled_up.magnification, egui::TextureFilter::Nearest);
+
+        let opts_scaled_down = CanvasState::get_texture_options(FilterMode::Auto, 0.5);
+        assert_eq!(opts_scaled_down.magnification, egui::TextureFilter::Linear);
     }
 }

@@ -3,6 +3,8 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
+use image::DynamicImage;
+
 #[derive(Clone)]
 pub struct DecodedImage {
     pub width: u32,
@@ -24,7 +26,7 @@ fn read_exif_orientation(file_bytes: &[u8]) -> u32 {
     1
 }
 
-pub fn decode_full_image(path: &Path) -> Result<Arc<DecodedImage>, String> {
+fn decode_oriented_image(path: &Path) -> Result<DynamicImage, String> {
     let file_bytes = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
     let orientation = read_exif_orientation(&file_bytes);
 
@@ -32,7 +34,7 @@ pub fn decode_full_image(path: &Path) -> Result<Arc<DecodedImage>, String> {
     let dyn_img = image::load_from_memory(&file_bytes)
         .map_err(|e| format!("Failed to decode image: {}", e))?;
 
-    let oriented_img = match orientation {
+    Ok(match orientation {
         2 => dyn_img.fliph(),
         3 => dyn_img.rotate180(),
         4 => dyn_img.flipv(),
@@ -41,9 +43,11 @@ pub fn decode_full_image(path: &Path) -> Result<Arc<DecodedImage>, String> {
         7 => dyn_img.rotate270().fliph(),
         8 => dyn_img.rotate270(),
         _ => dyn_img,
-    };
+    })
+}
 
-    let rgba = oriented_img.to_rgba8();
+fn into_decoded(image: DynamicImage) -> Arc<DecodedImage> {
+    let rgba = image.to_rgba8();
     let width = rgba.width();
     let height = rgba.height();
     let raw_bytes = rgba.into_raw();
@@ -52,30 +56,44 @@ pub fn decode_full_image(path: &Path) -> Result<Arc<DecodedImage>, String> {
     let color_image =
         egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &raw_bytes);
 
-    Ok(Arc::new(DecodedImage {
+    Arc::new(DecodedImage {
         width,
         height,
         bytes_size,
         color_image: Arc::new(color_image),
-    }))
+    })
+}
+
+pub fn decode_full_image(path: &Path) -> Result<Arc<DecodedImage>, String> {
+    decode_oriented_image(path).map(into_decoded)
+}
+
+pub fn decode_full_image_with_preview<F>(
+    path: &Path,
+    preview_max_dim: u32,
+    on_preview: F,
+) -> Result<Arc<DecodedImage>, String>
+where
+    F: FnOnce(u32, u32, Arc<egui::ColorImage>),
+{
+    let image = decode_oriented_image(path)?;
+    let (width, height) = (image.width(), image.height());
+    if width.max(height) > preview_max_dim.saturating_mul(2) {
+        let preview = image.thumbnail(preview_max_dim, preview_max_dim).to_rgba8();
+        let preview_size = [preview.width() as usize, preview.height() as usize];
+        let preview = Arc::new(egui::ColorImage::from_rgba_unmultiplied(
+            preview_size,
+            preview.as_raw(),
+        ));
+        on_preview(width, height, preview);
+    }
+    Ok(into_decoded(image))
 }
 
 pub fn decode_thumbnail(path: &Path, max_dim: u32) -> Result<egui::ColorImage, String> {
-    let file_bytes = fs::read(path).map_err(|e| format!("Failed to read file: {e}"))?;
-    let orientation = read_exif_orientation(&file_bytes);
-    let image =
-        image::load_from_memory(&file_bytes).map_err(|e| format!("Failed to decode image: {e}"))?;
-    let oriented = match orientation {
-        2 => image.fliph(),
-        3 => image.rotate180(),
-        4 => image.flipv(),
-        5 => image.rotate90().fliph(),
-        6 => image.rotate90(),
-        7 => image.rotate270().fliph(),
-        8 => image.rotate270(),
-        _ => image,
-    };
-    let thumbnail = oriented.thumbnail(max_dim, max_dim).to_rgba8();
+    let thumbnail = decode_oriented_image(path)?
+        .thumbnail(max_dim, max_dim)
+        .to_rgba8();
     let size = [thumbnail.width() as usize, thumbnail.height() as usize];
     Ok(egui::ColorImage::from_rgba_unmultiplied(
         size,
@@ -119,4 +137,29 @@ pub fn generate_thumbnail(
         [dst_w as usize, dst_h as usize],
         dst_image.buffer(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_keeps_full_dimensions_with_a_small_pixel_buffer() {
+        let path =
+            std::env::temp_dir().join(format!("viewlume-preview-test-{}.png", std::process::id()));
+        image::RgbaImage::from_pixel(800, 400, image::Rgba([20, 40, 60, 255]))
+            .save(&path)
+            .expect("save preview fixture");
+
+        let mut preview_size = None;
+        let decoded = decode_full_image_with_preview(&path, 128, |width, height, preview| {
+            assert_eq!((width, height), (800, 400));
+            preview_size = Some(preview.size);
+        })
+        .expect("decode image with preview");
+
+        assert_eq!((decoded.width, decoded.height), (800, 400));
+        assert_eq!(preview_size, Some([128, 64]));
+        let _ = std::fs::remove_file(path);
+    }
 }

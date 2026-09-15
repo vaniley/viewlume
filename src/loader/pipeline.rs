@@ -1,6 +1,7 @@
 use crate::cache::ImageCache;
 use crate::loader::decoder::{
-    decode_full_image, decode_thumbnail, generate_thumbnail, DecodedImage,
+    decode_full_image, decode_full_image_with_preview, decode_thumbnail, generate_thumbnail,
+    DecodedImage,
 };
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TrySendError};
 use std::collections::HashSet;
@@ -12,6 +13,7 @@ use std::thread;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
     Immediate,
+    ImmediateWithPreview,
     Prefetch,
 }
 
@@ -29,6 +31,14 @@ pub struct ThumbnailTask {
 }
 
 pub enum LoadResult {
+    Preview {
+        path: PathBuf,
+        index: usize,
+        epoch: u64,
+        width: u32,
+        height: u32,
+        image: Arc<egui::ColorImage>,
+    },
     FullImage {
         path: PathBuf,
         index: usize,
@@ -43,7 +53,8 @@ pub enum LoadResult {
 }
 
 pub struct LoaderPipeline {
-    full_task_tx: Sender<FullImageTask>,
+    immediate_task_tx: Sender<FullImageTask>,
+    prefetch_task_tx: Sender<FullImageTask>,
     thumb_task_tx: Sender<ThumbnailTask>,
     result_rx: Receiver<LoadResult>,
     pub current_epoch: Arc<AtomicU64>,
@@ -59,7 +70,8 @@ impl LoaderPipeline {
         repaint_ctx: egui::Context,
         thumbnail_size: u32,
     ) -> Self {
-        let (full_task_tx, full_task_rx) = unbounded::<FullImageTask>();
+        let (immediate_task_tx, immediate_task_rx) = unbounded::<FullImageTask>();
+        let (prefetch_task_tx, prefetch_task_rx) = unbounded::<FullImageTask>();
         // A bounded queue prevents a huge folder from turning one gallery open into
         // thousands of decodes and an out-of-memory crash.
         let (thumb_task_tx, thumb_task_rx) = bounded::<ThumbnailTask>(64);
@@ -71,8 +83,9 @@ impl LoaderPipeline {
 
         // Spawn full-image worker threads (fast decode, prioritizes active image)
         let full_workers = (num_threads / 2).clamp(1, 2);
-        for _ in 0..full_workers {
-            let rx = full_task_rx.clone();
+        for worker_index in 0..full_workers {
+            let immediate_rx = immediate_task_rx.clone();
+            let prefetch_rx = prefetch_task_rx.clone();
             let tx = result_tx.clone();
             let epoch_atomic = Arc::clone(&current_epoch);
             let cache_ref = Arc::clone(&cache);
@@ -83,7 +96,26 @@ impl LoaderPipeline {
             thread::Builder::new()
                 .name("full-img-worker".to_string())
                 .spawn(move || {
-                    while let Ok(task) = rx.recv() {
+                    loop {
+                        // Keep one worker reserved for images explicitly opened by the user.
+                        // The other worker prefers immediate work but uses idle time to prefetch.
+                        let task = if worker_index + 1 < full_workers {
+                            match immediate_rx.recv() {
+                                Ok(task) => task,
+                                Err(_) => break,
+                            }
+                        } else {
+                            crossbeam_channel::select_biased! {
+                                recv(immediate_rx) -> task => match task {
+                                    Ok(task) => task,
+                                    Err(_) => break,
+                                },
+                                recv(prefetch_rx) -> task => match task {
+                                    Ok(task) => task,
+                                    Err(_) => break,
+                                },
+                            }
+                        };
                         let task_path_for_pending = task.path.clone();
                         // Drop all obsolete navigation work, including old immediate tasks.
                         if task.epoch < epoch_atomic.load(Ordering::Relaxed) {
@@ -108,7 +140,28 @@ impl LoaderPipeline {
                             continue;
                         }
 
-                        let result = decode_full_image(&task.path);
+                        let result = if task.priority == Priority::ImmediateWithPreview {
+                            let preview_path = task.path.clone();
+                            let preview_tx = tx.clone();
+                            let preview_repaint = repaint.clone();
+                            decode_full_image_with_preview(
+                                &task.path,
+                                thumb_size.max(512),
+                                move |width, height, image| {
+                                    let _ = preview_tx.send(LoadResult::Preview {
+                                        path: preview_path,
+                                        index: task.index,
+                                        epoch: task.epoch,
+                                        width,
+                                        height,
+                                        image,
+                                    });
+                                    preview_repaint.request_repaint();
+                                },
+                            )
+                        } else {
+                            decode_full_image(&task.path)
+                        };
                         if let Ok(ref img) = result {
                             cache_ref.insert_full(task.path.clone(), Arc::clone(img));
                         }
@@ -193,7 +246,8 @@ impl LoaderPipeline {
         }
 
         Self {
-            full_task_tx,
+            immediate_task_tx,
+            prefetch_task_tx,
             thumb_task_tx,
             result_rx,
             current_epoch,
@@ -239,12 +293,18 @@ impl LoaderPipeline {
         }
 
         let epoch = self.current_epoch();
-        let _ = self.full_task_tx.send(FullImageTask {
+        let task = FullImageTask {
             path,
             index,
             epoch,
             priority,
-        });
+        };
+        let _ = match priority {
+            Priority::Immediate | Priority::ImmediateWithPreview => {
+                self.immediate_task_tx.send(task)
+            }
+            Priority::Prefetch => self.prefetch_task_tx.send(task),
+        };
         None
     }
 
