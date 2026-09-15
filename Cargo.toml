@@ -20,7 +20,7 @@ eframe = { version = "0.29", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-egui = { version = "0.29", features = ["default_fonts"] }
+egui = { version = "0.36", features = ["default_fonts"] }
 
 # Image Decoding and Processing
 image = { version = "0.25", default-features = false, features = [
