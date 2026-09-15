@@ -107,7 +107,7 @@ jobs:
           Copy-Item target/${{ matrix.target }}/release/viewlume.exe dist/viewlume/
           Copy-Item README.md, LICENSE, CHANGELOG.md dist/viewlume/
           Compress-Archive -Path dist/viewlume -DestinationPath dist/${{ matrix.artifact }}.zip
-          dotnet tool install --global wix
+          dotnet tool install --global wix --version 5.0.2
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           wix build packaging/windows/viewlume.wxs -arch x64 -dBinaryPath=target/${{ matrix.target }}/release/viewlume.exe -dProductVersion=$version -o dist/${{ matrix.artifact }}.msi
           if ($env:WINDOWS_CERTIFICATE_BASE64) {
