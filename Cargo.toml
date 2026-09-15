@@ -39,7 +39,7 @@ image = { version = "0.25", default-features = false, features = [
     "tga",
     "qoi",
 ] }
-fast_image_resize = { version = "5", features = ["rayon"] }
+fast_image_resize = { version = "6", features = ["rayon"] }
 kamadak-exif = "0.5"
 
 # Concurrency and Data Structures
