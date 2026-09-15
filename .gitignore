@@ -1,10 +1,27 @@
+# Build
 /target/
 /dist/
+
+# Logs & profiling
 *.log
 *.profraw
+
+# OS junk
 .DS_Store
 Thumbs.db
+
+# Editors / IDEs
 /.idea/
 /.vscode/
 *.swp
 *.swo
+*~
+
+# Claude Code local state
+/.claude/
+
+# Temp / scratch
+i.md
+
+# Test fixtures (generated programmatically in tests)
+/test_images/

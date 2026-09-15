@@ -3,6 +3,8 @@
 [![CI](https://github.com/vaniley/viewlume/actions/workflows/ci.yml/badge.svg)](https://github.com/vaniley/viewlume/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+[Русская версия](README.ru.md)
+
 Viewlume is a fast, GPU-accelerated image viewer for Linux and Windows. It keeps the image in focus with a transparent fullscreen mode, fluid zoom and pan, keyboard navigation, and a lightweight thumbnail carousel.
 
 ## Highlights
@@ -22,7 +24,41 @@ JPEG, PNG, WebP, BMP, TIFF, QOI, and the first frame of GIF images.
 
 ## Install
 
-Download the archive for your platform from [GitHub Releases](https://github.com/vaniley/viewlume/releases), extract it, and run `viewlume` (`viewlume.exe` on Windows). You can pass an image or directory as the first argument:
+Download the archive for your platform from [GitHub Releases](https://github.com/vaniley/viewlume/releases).
+
+### Linux
+
+```console
+# Download and verify
+wget https://github.com/vaniley/viewlume/releases/latest/download/viewlume-linux-x86_64.tar.gz
+wget https://github.com/vaniley/viewlume/releases/latest/download/viewlume-linux-x86_64.tar.gz.sha256
+sha256sum -c viewlume-linux-x86_64.tar.gz.sha256
+
+# Extract and install
+tar xzf viewlume-linux-x86_64.tar.gz
+sudo cp viewlume/viewlume /usr/local/bin/
+```
+
+Runtime dependencies (Wayland/X11 libs and GTK for file dialogs):
+
+```console
+# Ubuntu / Debian
+sudo apt install libwayland-client0 libxkbcommon0 libgtk-3-0
+
+# Fedora
+sudo dnf install wayland-devel libxkbcommon gtk3
+
+# Arch / CachyOS / Manjaro — already included in a standard desktop install
+```
+
+### Windows
+
+1. Download `viewlume-windows-x86_64.zip` from [Releases](https://github.com/vaniley/viewlume/releases).
+2. Extract the ZIP to any folder (e.g. `C:\Program Files\Viewlume\`).
+3. Run `viewlume.exe`. No extra dependencies required.
+4. Optionally add the folder to `PATH` (Settings > System > Advanced > Environment Variables > Path).
+
+### Usage
 
 ```console
 viewlume path/to/image.png
@@ -61,10 +97,10 @@ cargo build --release --locked
 
 The executable is written to `target/release/viewlume` on Linux or `target/release/viewlume.exe` on Windows.
 
-Linux builds may require the Wayland/X11 development packages supplied by the distribution. On Ubuntu:
+Linux builds may require the Wayland/X11 and GTK development packages supplied by the distribution. On Ubuntu:
 
 ```console
-sudo apt-get install libwayland-dev libxkbcommon-dev
+sudo apt-get install libwayland-dev libxkbcommon-dev libgtk-3-dev libatk1.0-dev libglib2.0-dev
 ```
 
 ## Configuration

@@ -59,7 +59,7 @@ impl Default for WindowConfig {
         Self {
             mode: WindowMode::Overlay,
             double_click_action: DoubleClickAction::ToggleWindowMode,
-            bg_color: [14, 14, 16, 245], // Dark sleek overlay
+            bg_color: [14, 14, 16, 180], // Dark overlay, semi-transparent in overlay mode
             show_checkerboard_for_transparent: true,
             auto_hide_ui: true,
             ui_fade_timeout_secs: 2.0,

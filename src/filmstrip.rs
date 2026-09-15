@@ -1,13 +1,16 @@
 use egui::{Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, Vec2};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::{FilmstripConfig, FilmstripVisibility};
 use crate::loader::pipeline::LoaderPipeline;
 
+const MAX_THUMB_TEXTURES: usize = 512;
+
 pub struct FilmstripState {
     pub thumb_textures: HashMap<PathBuf, TextureHandle>,
+    thumb_lru: VecDeque<PathBuf>,
     pub hover_anim: f32,
     last_scrolled_index: Option<usize>,
 }
@@ -16,6 +19,7 @@ impl Default for FilmstripState {
     fn default() -> Self {
         Self {
             thumb_textures: HashMap::new(),
+            thumb_lru: VecDeque::new(),
             hover_anim: 0.0,
             last_scrolled_index: None,
         }
@@ -24,6 +28,15 @@ impl Default for FilmstripState {
 
 pub struct FilmstripResponse {
     pub selected_index: Option<usize>,
+    pub scroll_nav: ScrollNav,
+}
+
+#[derive(Default)]
+pub enum ScrollNav {
+    #[default]
+    None,
+    Next,
+    Prev,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -39,8 +52,12 @@ pub fn render_filmstrip(
     dt: f32,
 ) -> FilmstripResponse {
     let mut selected_index = None;
+    let mut scroll_nav = ScrollNav::None;
     if files.is_empty() {
-        return FilmstripResponse { selected_index };
+        return FilmstripResponse {
+            selected_index,
+            scroll_nav,
+        };
     }
 
     let base_size = cfg.thumbnail_size as f32;
@@ -63,7 +80,10 @@ pub fn render_filmstrip(
         ui.ctx().request_repaint();
     }
     if state.hover_anim <= 0.01 {
-        return FilmstripResponse { selected_index };
+        return FilmstripResponse {
+            selected_index,
+            scroll_nav,
+        };
     }
 
     let slide = (1.0 - state.hover_anim) * (strip_height + 8.0);
@@ -71,7 +91,15 @@ pub fn render_filmstrip(
         Pos2::new(viewport.min.x, viewport.max.y - strip_height + slide),
         Vec2::new(viewport.width(), strip_height),
     );
-    ui.allocate_rect(strip_rect, Sense::hover());
+    let strip_response = ui.allocate_rect(strip_rect, Sense::hover());
+    let wheel_delta = ui.input(|i| i.raw_scroll_delta.y);
+    if strip_response.hovered() && wheel_delta.abs() > 1.0 {
+        if wheel_delta < 0.0 {
+            scroll_nav = ScrollNav::Next;
+        } else {
+            scroll_nav = ScrollNav::Prev;
+        }
+    }
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(strip_rect)
@@ -131,7 +159,7 @@ pub fn render_filmstrip(
                     (1.0 - (slot_center_x - center_x).abs() / influence).clamp(0.0, 1.0);
                 let eased = proximity * proximity * (3.0 - 2.0 * proximity);
                 let scale = if cfg.coverflow_effect {
-                    0.68 + eased * 0.32
+                    0.45 + eased * eased * 0.55
                 } else {
                     1.0
                 };
@@ -150,7 +178,9 @@ pub fn render_filmstrip(
                 }
 
                 let texture_id = if let Some(texture) = state.thumb_textures.get(path) {
-                    Some((texture.id(), texture.size_vec2()))
+                    let result = (texture.id(), texture.size_vec2());
+                    state.touch_lru(path);
+                    Some(result)
                 } else if let Some(image) =
                     pipeline.request_thumbnail(path.clone(), idx, cfg.thumbnail_size)
                 {
@@ -160,7 +190,7 @@ pub fn render_filmstrip(
                         TextureOptions::LINEAR,
                     );
                     let result = (texture.id(), texture.size_vec2());
-                    state.thumb_textures.insert(path.clone(), texture);
+                    state.insert_thumb_texture(path.clone(), texture);
                     Some(result)
                 } else {
                     None
@@ -170,7 +200,7 @@ pub fn render_filmstrip(
                     let fit = (draw_size / texture_size.x).min(draw_size / texture_size.y);
                     let image_size = texture_size * fit;
                     let image_rect = Rect::from_center_size(center, image_size);
-                    let alpha = (150.0 + 105.0 * eased) as u8;
+                    let alpha = (100.0 + 155.0 * eased) as u8;
                     ui.painter().image(
                         texture_id,
                         image_rect,
@@ -197,10 +227,30 @@ pub fn render_filmstrip(
             }
         });
 
-    FilmstripResponse { selected_index }
+    FilmstripResponse {
+        selected_index,
+        scroll_nav,
+    }
 }
 
 impl FilmstripState {
+    fn touch_lru(&mut self, path: &PathBuf) {
+        if let Some(pos) = self.thumb_lru.iter().position(|p| p == path) {
+            self.thumb_lru.remove(pos);
+        }
+        self.thumb_lru.push_back(path.clone());
+    }
+
+    fn evict_if_needed(&mut self) {
+        while self.thumb_textures.len() > MAX_THUMB_TEXTURES {
+            if let Some(old) = self.thumb_lru.pop_front() {
+                self.thumb_textures.remove(&old);
+            } else {
+                break;
+            }
+        }
+    }
+
     pub fn insert_loaded_thumbnail(
         &mut self,
         ctx: &egui::Context,
@@ -209,11 +259,20 @@ impl FilmstripState {
         thumb: Arc<egui::ColorImage>,
     ) {
         let texture = ctx.load_texture(format!("thumb-{index}"), thumb, TextureOptions::LINEAR);
+        self.touch_lru(&path);
         self.thumb_textures.insert(path, texture);
+        self.evict_if_needed();
+    }
+
+    pub fn insert_thumb_texture(&mut self, path: PathBuf, texture: TextureHandle) {
+        self.touch_lru(&path);
+        self.thumb_textures.insert(path, texture);
+        self.evict_if_needed();
     }
 
     pub fn clear(&mut self) {
         self.thumb_textures.clear();
+        self.thumb_lru.clear();
         self.last_scrolled_index = None;
     }
 }

@@ -39,9 +39,11 @@ fn main() -> eframe::Result<()> {
         .with_drag_and_drop(true);
 
     if is_overlay {
+        // Maximized + no decorations instead of fullscreen — Hyprland treats
+        // fullscreen surfaces as opaque, which blocks transparency.
         viewport_builder = viewport_builder
             .with_decorations(false)
-            .with_fullscreen(true);
+            .with_maximized(true);
     } else {
         viewport_builder = viewport_builder.with_decorations(true).with_maximized(true);
     }

@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::cache::ImageCache;
 use crate::canvas::{render_canvas, CanvasState};
 use crate::config::{DoubleClickAction, FilterMode, ViewerConfig, WindowMode};
-use crate::filmstrip::{render_filmstrip, FilmstripState};
+use crate::filmstrip::{render_filmstrip, FilmstripState, ScrollNav};
 use crate::loader::decoder::DecodedImage;
 use crate::loader::pipeline::{LoadResult, LoaderPipeline, Priority};
 use crate::navigation::{render_edge_chevrons, FolderNavigator, NavAction};
@@ -141,7 +141,12 @@ impl ImageViewerApp {
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let pipeline = LoaderPipeline::new(Arc::clone(&cache), num_cpus, cc.egui_ctx.clone());
+        let pipeline = LoaderPipeline::new(
+            Arc::clone(&cache),
+            num_cpus,
+            cc.egui_ctx.clone(),
+            config.filmstrip.thumbnail_size,
+        );
 
         let mut app = Self {
             window_mode: config.window.mode,
@@ -215,8 +220,10 @@ impl ImageViewerApp {
         }
 
         let cur = self.navigator.current_index;
-        let count = self.config.cache.prefetch_count;
+        let count = self.config.cache.prefetch_count.min(total - 1);
         let wrap = self.config.navigation.loop_folder;
+
+        let mut seen = Vec::with_capacity(count * 2);
 
         for offset in 1..=count {
             // Forward
@@ -228,24 +235,30 @@ impl ImageViewerApp {
                 None
             };
             if let Some(idx) = fwd_idx {
-                if let Some(path) = self.navigator.files.get(idx) {
-                    self.pipeline
-                        .request_full_image(path.clone(), idx, Priority::Prefetch);
+                if idx != cur && !seen.contains(&idx) {
+                    seen.push(idx);
+                    if let Some(path) = self.navigator.files.get(idx) {
+                        self.pipeline
+                            .request_full_image(path.clone(), idx, Priority::Prefetch);
+                    }
                 }
             }
 
-            // Backward
+            // Backward — use wrapping subtraction to avoid underflow
             let bwd_idx = if cur >= offset {
                 Some(cur - offset)
             } else if wrap {
-                Some(total - (offset - cur))
+                Some(total - offset + cur)
             } else {
                 None
             };
             if let Some(idx) = bwd_idx {
-                if let Some(path) = self.navigator.files.get(idx) {
-                    self.pipeline
-                        .request_full_image(path.clone(), idx, Priority::Prefetch);
+                if idx != cur && !seen.contains(&idx) {
+                    seen.push(idx);
+                    if let Some(path) = self.navigator.files.get(idx) {
+                        self.pipeline
+                            .request_full_image(path.clone(), idx, Priority::Prefetch);
+                    }
                 }
             }
         }
@@ -303,11 +316,13 @@ impl ImageViewerApp {
                 self.window_mode = WindowMode::Windowed;
                 ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
+                ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
                 self.show_toast("Mode: Windowed");
             }
             WindowMode::Windowed => {
                 self.window_mode = WindowMode::Overlay;
-                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
+                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+                ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
                 self.show_toast("Mode: Fullscreen overlay");
             }
@@ -315,6 +330,9 @@ impl ImageViewerApp {
     }
 
     pub fn process_incoming_results(&mut self, ctx: &Context) {
+        const MAX_THUMB_UPLOADS_PER_FRAME: usize = 8;
+        let mut thumb_uploads = 0;
+
         while let Some(res) = self.pipeline.try_recv_result() {
             match res {
                 LoadResult::FullImage {
@@ -359,10 +377,15 @@ impl ImageViewerApp {
                     index,
                     result,
                 } => {
+                    if thumb_uploads >= MAX_THUMB_UPLOADS_PER_FRAME {
+                        ctx.request_repaint();
+                        continue;
+                    }
                     if self.navigator.files.get(index) == Some(&path) {
                         if let Ok(thumb) = result {
                             self.filmstrip_state
                                 .insert_loaded_thumbnail(ctx, path, index, thumb);
+                            thumb_uploads += 1;
                             ctx.request_repaint();
                         }
                     }
@@ -548,17 +571,7 @@ impl ImageViewerApp {
 
 impl eframe::App for ImageViewerApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        if self.window_mode == WindowMode::Overlay {
-            [0.0, 0.0, 0.0, 0.0]
-        } else {
-            let color = self.config.window.bg_color;
-            [
-                color[0] as f32 / 255.0,
-                color[1] as f32 / 255.0,
-                color[2] as f32 / 255.0,
-                1.0,
-            ]
-        }
+        [0.0, 0.0, 0.0, 0.0]
     }
 
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
@@ -587,9 +600,11 @@ impl eframe::App for ImageViewerApp {
         // Manage UI auto-fade
         self.update_ui_fade(ctx, cursor_pos, dt);
 
-        // Draw background
+        // Draw background — overlay uses semi-transparent dark for see-through darkening,
+        // windowed is fully opaque.
         let bg_color = if self.window_mode == WindowMode::Overlay {
-            Color32::TRANSPARENT
+            let c = self.config.window.bg_color;
+            Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
         } else {
             Color32::from_rgb(
                 self.config.window.bg_color[0],
@@ -680,6 +695,11 @@ impl eframe::App for ImageViewerApp {
                 );
                 if let Some(idx) = film_resp.selected_index {
                     self.jump_to(idx);
+                }
+                match film_resp.scroll_nav {
+                    ScrollNav::Next => self.navigate_next(),
+                    ScrollNav::Prev => self.navigate_prev(),
+                    ScrollNav::None => {}
                 }
 
                 // 4. Frameless icon controls leave the image as the only visual focus.

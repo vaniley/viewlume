@@ -49,10 +49,16 @@ pub struct LoaderPipeline {
     pub current_epoch: Arc<AtomicU64>,
     cache: Arc<ImageCache>,
     pending_thumbnails: Arc<Mutex<HashSet<PathBuf>>>,
+    pending_full: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl LoaderPipeline {
-    pub fn new(cache: Arc<ImageCache>, num_threads: usize, repaint_ctx: egui::Context) -> Self {
+    pub fn new(
+        cache: Arc<ImageCache>,
+        num_threads: usize,
+        repaint_ctx: egui::Context,
+        thumbnail_size: u32,
+    ) -> Self {
         let (full_task_tx, full_task_rx) = unbounded::<FullImageTask>();
         // A bounded queue prevents a huge folder from turning one gallery open into
         // thousands of decodes and an out-of-memory crash.
@@ -61,6 +67,7 @@ impl LoaderPipeline {
 
         let current_epoch = Arc::new(AtomicU64::new(1));
         let pending_thumbnails = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
+        let pending_full = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
 
         // Spawn full-image worker threads (fast decode, prioritizes active image)
         let full_workers = (num_threads / 2).clamp(1, 2);
@@ -69,14 +76,20 @@ impl LoaderPipeline {
             let tx = result_tx.clone();
             let epoch_atomic = Arc::clone(&current_epoch);
             let cache_ref = Arc::clone(&cache);
+            let pending_ref = Arc::clone(&pending_full);
             let repaint = repaint_ctx.clone();
+            let thumb_size = thumbnail_size;
 
             thread::Builder::new()
                 .name("full-img-worker".to_string())
                 .spawn(move || {
                     while let Ok(task) = rx.recv() {
+                        let task_path_for_pending = task.path.clone();
                         // Drop all obsolete navigation work, including old immediate tasks.
                         if task.epoch < epoch_atomic.load(Ordering::Relaxed) {
+                            if let Ok(mut pending) = pending_ref.lock() {
+                                pending.remove(&task_path_for_pending);
+                            }
                             continue;
                         }
 
@@ -89,20 +102,18 @@ impl LoaderPipeline {
                                 result: Ok(cached),
                             });
                             repaint.request_repaint();
+                            if let Ok(mut pending) = pending_ref.lock() {
+                                pending.remove(&task_path_for_pending);
+                            }
                             continue;
                         }
 
                         let result = decode_full_image(&task.path);
                         if let Ok(ref img) = result {
                             cache_ref.insert_full(task.path.clone(), Arc::clone(img));
-                            // Also populate thumbnail if missing
-                            if cache_ref.get_thumbnail(&task.path).is_none() {
-                                if let Ok(thumb) = generate_thumbnail(img, 128) {
-                                    cache_ref.insert_thumbnail(task.path.clone(), Arc::new(thumb));
-                                }
-                            }
                         }
 
+                        let task_path = task.path.clone();
                         let _ = tx.send(LoadResult::FullImage {
                             path: task.path,
                             index: task.index,
@@ -110,6 +121,19 @@ impl LoaderPipeline {
                             result,
                         });
                         repaint.request_repaint();
+                        if let Ok(mut pending) = pending_ref.lock() {
+                            pending.remove(&task_path_for_pending);
+                        }
+
+                        // Generate thumbnail after sending the full image result
+                        if cache_ref.get_thumbnail(&task_path).is_none() {
+                            if let Some(full) = cache_ref.get_full(&task_path) {
+                                if let Ok(thumb) = generate_thumbnail(&full, thumb_size) {
+                                    cache_ref.insert_thumbnail(task_path, Arc::new(thumb));
+                                    repaint.request_repaint();
+                                }
+                            }
+                        }
                     }
                 })
                 .expect("Failed to spawn full image worker thread");
@@ -175,11 +199,16 @@ impl LoaderPipeline {
             current_epoch,
             cache,
             pending_thumbnails,
+            pending_full,
         }
     }
 
     pub fn next_epoch(&self) -> u64 {
-        self.current_epoch.fetch_add(1, Ordering::SeqCst) + 1
+        let epoch = self.current_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Ok(mut pending) = self.pending_full.lock() {
+            pending.clear();
+        }
+        epoch
     }
 
     pub fn current_epoch(&self) -> u64 {
@@ -192,9 +221,21 @@ impl LoaderPipeline {
         index: usize,
         priority: Priority,
     ) -> Option<Arc<DecodedImage>> {
-        // If already cached, return immediately
         if let Some(cached) = self.cache.get_full(&path) {
             return Some(cached);
+        }
+
+        // Immediate requests always go through (they reset epoch anyway).
+        // Prefetch requests are deduped to avoid redundant work.
+        if priority == Priority::Prefetch {
+            let Ok(mut pending) = self.pending_full.lock() else {
+                return None;
+            };
+            if !pending.insert(path.clone()) {
+                return None;
+            }
+        } else if let Ok(mut pending) = self.pending_full.lock() {
+            pending.insert(path.clone());
         }
 
         let epoch = self.current_epoch();

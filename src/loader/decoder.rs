@@ -100,11 +100,11 @@ pub fn generate_thumbnail(
         return Ok((*full_image.color_image).clone());
     }
 
-    use fast_image_resize::images::Image;
+    use fast_image_resize::images::{Image, ImageRef};
     use fast_image_resize::{PixelType, ResizeOptions, Resizer};
 
     let src_bytes = full_image.color_image.as_raw();
-    let src_image = Image::from_vec_u8(src_w, src_h, src_bytes.to_vec(), PixelType::U8x4)
+    let src_image = ImageRef::new(src_w, src_h, src_bytes, PixelType::U8x4)
         .map_err(|e| format!("fast_image_resize src error: {:?}", e))?;
 
     let mut dst_image = Image::new(dst_w, dst_h, PixelType::U8x4);
