@@ -106,6 +106,7 @@ pub struct SettingsDialog {
     category: SettingsCategory,
     reset_pending: bool,
     reset_focus_requested: bool,
+    text_edit_focused_last_frame: bool,
     save_error: Option<SaveError>,
 }
 
@@ -137,6 +138,7 @@ impl SettingsDialog {
         opaque_window: bool,
     ) -> SettingsOutcome {
         if !self.is_open {
+            self.text_edit_focused_last_frame = false;
             return SettingsOutcome::default();
         }
 
@@ -254,7 +256,10 @@ impl SettingsDialog {
         if !self.is_open {
             self.reset_pending = false;
             self.reset_focus_requested = false;
+            self.text_edit_focused_last_frame = false;
             self.save_error = None;
+        } else {
+            self.remember_text_edit_focus(ctx);
         }
         outcome
     }
@@ -298,10 +303,16 @@ impl SettingsDialog {
         } else if self.reset_pending {
             self.reset_pending = false;
             self.reset_focus_requested = false;
-        } else if !ctx.wants_keyboard_input() {
+        } else if !self.text_edit_focused_last_frame {
             *open = false;
             outcome.action = SettingsAction::Close;
         }
+    }
+
+    fn remember_text_edit_focus(&mut self, ctx: &Context) {
+        self.text_edit_focused_last_frame = ctx
+            .memory(|memory| memory.focused())
+            .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
     }
 
     fn save_result(&mut self, after_reset: bool, result: Result<(), String>) -> bool {
@@ -1002,13 +1013,22 @@ mod tests {
 
         let mut focused_dialog = SettingsDialog::default();
         let focused_ctx = Context::default();
+        let mut text = String::new();
+        let _ = focused_ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let response =
+                    ui.add(egui::TextEdit::singleline(&mut text).id_salt("test.text_edit"));
+                response.request_focus();
+            });
+            focused_dialog.remember_text_edit_focus(ctx);
+            assert!(focused_dialog.text_edit_focused_last_frame);
+        });
         let _ = focused_ctx.run(
             egui::RawInput {
                 events: vec![escape.clone()],
                 ..Default::default()
             },
             |ctx| {
-                ctx.memory_mut(|memory| memory.request_focus(Id::new("test.text_edit")));
                 let mut open = true;
                 let mut outcome = SettingsOutcome::default();
                 focused_dialog.handle_escape(ctx, &mut open, &mut outcome);
@@ -1017,6 +1037,7 @@ mod tests {
             },
         );
 
+        let mut close_dialog = SettingsDialog::default();
         let close_ctx = Context::default();
         let _ = close_ctx.run(
             egui::RawInput {
@@ -1026,7 +1047,7 @@ mod tests {
             |ctx| {
                 let mut open = true;
                 let mut outcome = SettingsOutcome::default();
-                focused_dialog.handle_escape(ctx, &mut open, &mut outcome);
+                close_dialog.handle_escape(ctx, &mut open, &mut outcome);
                 assert!(!open);
                 assert_eq!(outcome.action, SettingsAction::Close);
             },
@@ -1054,7 +1075,7 @@ mod tests {
             |ctx| {
                 let mut open = true;
                 let mut outcome = SettingsOutcome::default();
-                focused_dialog.handle_escape(ctx, &mut open, &mut outcome);
+                close_dialog.handle_escape(ctx, &mut open, &mut outcome);
                 assert!(open);
                 assert_eq!(outcome.action, SettingsAction::None);
             },
