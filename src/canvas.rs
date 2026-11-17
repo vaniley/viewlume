@@ -365,15 +365,23 @@ pub struct CanvasResponse {
     pub double_clicked: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CanvasInput {
+    pub enabled: bool,
+    pub wheel_zoom: bool,
+}
+
 pub fn render_canvas(
     ui: &mut Ui,
     state: &mut CanvasState,
     current_image: Option<&Arc<DecodedImage>>,
     render_cfg: &RenderingConfig,
     show_checkerboard: bool,
-    allow_input: bool,
+    input: CanvasInput,
     empty_hint: Option<&str>,
 ) -> CanvasResponse {
+    let allow_input = input.enabled;
+    let allow_wheel_zoom = input.wheel_zoom;
     let sense = if allow_input {
         Sense::click_and_drag()
     } else {
@@ -394,7 +402,7 @@ pub fn render_canvas(
     }
 
     let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
-    if scroll_delta != 0.0 && response.hovered() && allow_input {
+    if scroll_delta != 0.0 && response.hovered() && allow_input && allow_wheel_zoom {
         if let Some(mouse_pos) = cursor_pos {
             let steps = (scroll_delta / 70.0).clamp(-4.0, 4.0) as f64;
             let exponent = if render_cfg.reverse_zoom_direction {
@@ -536,6 +544,12 @@ mod tests {
         }
     }
 
+    fn input_with_events(max_texture_side: usize, events: Vec<egui::Event>) -> egui::RawInput {
+        let mut input = input(max_texture_side);
+        input.events = events;
+        input
+    }
+
     fn texture_delta(output: &egui::FullOutput, id: TextureId) -> &egui::epaint::ImageDelta {
         &output
             .textures_delta
@@ -642,7 +656,10 @@ mod tests {
                     Some(&image),
                     &RenderingConfig::default(),
                     false,
-                    true,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: true,
+                    },
                     None,
                 );
             });
@@ -667,7 +684,10 @@ mod tests {
                     Some(&image),
                     &RenderingConfig::default(),
                     false,
-                    true,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: true,
+                    },
                     None,
                 );
             });
@@ -710,7 +730,10 @@ mod tests {
                     Some(&image),
                     &RenderingConfig::default(),
                     false,
-                    true,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: true,
+                    },
                     None,
                 );
             });
@@ -741,7 +764,10 @@ mod tests {
                         Some(&image),
                         &RenderingConfig::default(),
                         true,
-                        true,
+                        CanvasInput {
+                            enabled: true,
+                            wheel_zoom: true,
+                        },
                         None,
                     );
                 });
@@ -759,6 +785,101 @@ mod tests {
                 2,
                 Color32::WHITE,
             )))
+        );
+    }
+
+    #[test]
+    fn bottom_band_dragging_stays_enabled_when_only_wheel_zoom_is_blocked() {
+        let ctx = egui::Context::default();
+        let image = Arc::new(decoded(16, 16));
+        let mut state = CanvasState::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let start = Pos2::new(400.0, 550.0);
+        let mid = Pos2::new(440.0, 550.0);
+        let end = Pos2::new(480.0, 550.0);
+
+        let _ = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &image, FilterMode::Auto, true, false)
+                .expect("initial upload");
+        });
+        state.reset_view_actual_size(16.0, 16.0, viewport);
+        let initial_pan = state.pan;
+
+        // Egui registers the canvas interaction ID during a frame before it can receive a
+        // subsequent pointer press, mirroring the native app's already-running canvas.
+        let _ = ctx.run(input(2048), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_canvas(
+                    ui,
+                    &mut state,
+                    Some(&image),
+                    &RenderingConfig::default(),
+                    false,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: false,
+                    },
+                    None,
+                );
+            });
+        });
+
+        let _ = ctx.run(
+            input_with_events(
+                2048,
+                vec![
+                    egui::Event::PointerMoved(start),
+                    egui::Event::PointerButton {
+                        pos: start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            ),
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_canvas(
+                        ui,
+                        &mut state,
+                        Some(&image),
+                        &RenderingConfig::default(),
+                        false,
+                        CanvasInput {
+                            enabled: true,
+                            wheel_zoom: false,
+                        },
+                        None,
+                    );
+                });
+            },
+        );
+        for position in [mid, end] {
+            let _ = ctx.run(
+                input_with_events(2048, vec![egui::Event::PointerMoved(position)]),
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        render_canvas(
+                            ui,
+                            &mut state,
+                            Some(&image),
+                            &RenderingConfig::default(),
+                            false,
+                            CanvasInput {
+                                enabled: true,
+                                wheel_zoom: false,
+                            },
+                            None,
+                        );
+                    });
+                },
+            );
+        }
+
+        assert!(
+            state.pan.x > initial_pan.x,
+            "dragging in the filmstrip wheel-only zone must still pan the canvas"
         );
     }
 

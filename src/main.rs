@@ -13,7 +13,7 @@ pub mod settings_dialog;
 
 use app::ImageViewerApp;
 use config::{ViewerConfig, WindowMode};
-use diagnostics::{record_renderer_state, record_startup_failure};
+use diagnostics::{record_renderer_state, record_runtime_panic, record_startup_failure};
 use presentation::PresentationPolicy;
 use std::env;
 use std::path::PathBuf;
@@ -34,6 +34,7 @@ fn main() -> eframe::Result<()> {
 
     let config = ViewerConfig::load();
     let presentation = PresentationPolicy::from_environment();
+    install_panic_diagnostics(presentation);
     let language = config.general.language;
     let is_overlay = config.window.mode == WindowMode::Overlay;
 
@@ -82,13 +83,24 @@ fn main() -> eframe::Result<()> {
     result
 }
 
+fn install_panic_diagnostics(presentation: PresentationPolicy) {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let location = panic_info
+            .location()
+            .map(|location| (location.line(), location.column()));
+        let _ = std::panic::catch_unwind(|| record_runtime_panic(presentation, location));
+        previous_hook(panic_info);
+    }));
+}
+
 fn show_startup_error(language: config::Language, presentation: PresentationPolicy) {
     let russian = language.is_russian();
     let description = if cfg!(target_os = "windows") && !presentation.opaque_window() {
         if russian {
-            "Viewlume не удалось запустить GPU-рендерер. Подробности могут быть доступны в diagnostics.log рядом с config.toml.\n\nЕсли ошибка связана с прозрачным окном, запустите один раз с VIEWLUME_OPAQUE_WINDOW=1. Это может помочь с совместимостью композитора и прозрачности, но не исправляет недоступный адаптер или неподдерживаемый драйвер."
+            "Viewlume не удалось запустить GPU-рендерер. Подробности могут быть доступны в diagnostics.log рядом с config.toml.\n\nЕсли ошибка связана с прозрачным окном, задавайте VIEWLUME_OPAQUE_WINDOW=1 для каждого проблемного запуска. Это может помочь с совместимостью композитора и прозрачности, но не исправляет недоступный адаптер или неподдерживаемый драйвер."
         } else {
-            "Viewlume could not start its GPU renderer. Details may be available in diagnostics.log beside config.toml.\n\nIf this involves a transparent window, launch once with VIEWLUME_OPAQUE_WINDOW=1. It can help compositor/transparency compatibility, but cannot fix an unavailable adapter or unsupported driver."
+            "Viewlume could not start its GPU renderer. Details may be available in diagnostics.log beside config.toml.\n\nIf this involves a transparent window, set VIEWLUME_OPAQUE_WINDOW=1 for each affected launch. It can help compositor/transparency compatibility, but cannot fix an unavailable adapter or unsupported driver."
         }
     } else if russian {
         "Viewlume не удалось запустить GPU-рендерер. Подробности могут быть доступны в diagnostics.log рядом с config.toml."

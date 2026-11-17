@@ -1,13 +1,13 @@
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Vec2, ViewportCommand};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::cache::ImageCache;
-use crate::canvas::{render_canvas, CanvasState, TextureSizeError};
+use crate::canvas::{render_canvas, CanvasInput, CanvasState, TextureSizeError};
 use crate::config::{DoubleClickAction, FilterMode, ViewerConfig, WindowMode};
 use crate::filmstrip::{render_filmstrip, FilmstripState, ScrollNav};
 use crate::loader::decoder::DecodedImage;
@@ -16,7 +16,7 @@ use crate::navigation::{
     render_edge_chevrons, FolderNavigator, FolderScan, NavAction, SUPPORTED_IMAGE_EXTENSIONS,
 };
 use crate::presentation::PresentationPolicy;
-use crate::settings_dialog::SettingsDialog;
+use crate::settings_dialog::{SettingsChanges, SettingsDialog};
 
 #[derive(Clone, Copy)]
 enum ToolbarIcon {
@@ -170,6 +170,8 @@ pub struct ImageViewerApp {
     texture_reset_view: bool,
     texture_animate: bool,
     presentation: PresentationPolicy,
+    ignore_canvas_double_click_until: f64,
+    settings_held_keys: HashSet<egui::Key>,
     pub is_loading: bool,
     pub load_error: Option<String>,
     pub window_mode: WindowMode,
@@ -256,6 +258,8 @@ impl ImageViewerApp {
             texture_reset_view: true,
             texture_animate: false,
             presentation,
+            ignore_canvas_double_click_until: f64::NEG_INFINITY,
+            settings_held_keys: HashSet::new(),
             is_loading: false,
             load_error: None,
 
@@ -573,7 +577,6 @@ impl ImageViewerApp {
                 );
             }
         }
-        self.config.window.mode = self.window_mode;
     }
 
     pub fn process_incoming_results(&mut self, ctx: &Context) {
@@ -695,6 +698,22 @@ impl ImageViewerApp {
         if self.settings_dialog.is_open {
             return;
         }
+        // A key held in Settings remains owned by Settings until a fresh press.
+        ctx.input_mut(|input| {
+            input.events.retain(|event| match event {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: true,
+                    ..
+                } => !self.settings_held_keys.contains(key),
+                egui::Event::Key { key, .. } => {
+                    self.settings_held_keys.remove(key);
+                    true
+                }
+                _ => true,
+            });
+        });
         let (
             left_pressed,
             right_pressed,
@@ -720,7 +739,17 @@ impl ImageViewerApp {
                 i.key_pressed(egui::Key::Num0),
                 i.key_pressed(egui::Key::Num1),
                 i.key_pressed(egui::Key::F11),
-                i.key_pressed(egui::Key::Escape),
+                i.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        }
+                    )
+                }),
                 i.key_pressed(egui::Key::O),
                 i.key_pressed(egui::Key::S),
                 i.key_pressed(egui::Key::T),
@@ -761,12 +790,8 @@ impl ImageViewerApp {
         if f11_pressed {
             self.toggle_window_mode(ctx);
         }
-        if esc_pressed {
-            if self.settings_dialog.is_open {
-                self.settings_dialog.is_open = false;
-            } else if self.window_mode == WindowMode::Overlay {
-                self.toggle_window_mode(ctx);
-            }
+        if esc_pressed && self.window_mode == WindowMode::Overlay {
+            self.toggle_window_mode(ctx);
         }
         if o_pressed {
             if let Some(file) = rfd::FileDialog::new()
@@ -832,6 +857,36 @@ impl ImageViewerApp {
         }
     }
 
+    fn record_settings_close(&mut self, ctx: &Context) {
+        self.settings_held_keys = ctx.input(|input| input.keys_down.clone());
+        self.ignore_canvas_double_click_until = ctx.input(|input| input.time)
+            + ctx.options(|options| options.input_options.max_double_click_delay);
+    }
+
+    fn canvas_double_click_ready(&self, ctx: &Context) -> bool {
+        ctx.input(|input| input.time) >= self.ignore_canvas_double_click_until
+    }
+
+    fn apply_settings_changes(&mut self, ctx: &Context, changes: SettingsChanges) {
+        if changes.filter {
+            if let Err(error) = self
+                .canvas_state
+                .set_filter_mode(ctx, self.config.rendering.filter_mode)
+            {
+                self.image_upload_failed(error);
+            }
+        }
+        if changes.cache {
+            self.cache.set_capacity(
+                self.config.cache.max_ram_cache_mb,
+                self.config.cache.thumbnail_cache_count,
+            );
+        }
+        if changes.window_mode && self.window_mode != self.config.window.mode {
+            self.toggle_window_mode(ctx);
+        }
+    }
+
     pub fn update_ui_fade(&mut self, ctx: &Context, cursor_pos: Option<Pos2>, dt: f32) {
         let mouse_moved =
             ctx.input(|i| i.pointer.delta() != Vec2::ZERO || i.raw_scroll_delta != Vec2::ZERO);
@@ -866,7 +921,8 @@ impl ImageViewerApp {
         };
 
         let fade_speed = 4.0_f32;
-        self.ui_opacity += (target_opacity - self.ui_opacity) * (fade_speed * dt).min(1.0_f32);
+        self.ui_opacity +=
+            (target_opacity - self.ui_opacity) * fade_speed * dt.clamp(0.0, 1.0 / 30.0);
         if (self.ui_opacity - target_opacity).abs() > 0.01 {
             ctx.request_repaint();
         } else {
@@ -887,7 +943,7 @@ impl eframe::App for ImageViewerApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         let ru = self.config.general.language.is_russian();
         let tr = |english: &'static str, russian: &'static str| if ru { russian } else { english };
-        let dt = ctx.input(|i| i.unstable_dt).max(0.001);
+        let dt = ctx.input(|i| i.stable_dt).max(0.001);
         let cursor_pos = ctx.input(|i| i.pointer.hover_pos());
 
         // Process async worker responses
@@ -949,6 +1005,9 @@ impl eframe::App for ImageViewerApp {
             self.handle_drag_and_drop(ctx);
         }
 
+        // Keyboard navigation may activate a cache hit after the first upload.
+        self.upload_pending_texture(ctx);
+
         // Manage UI auto-fade
         self.update_ui_fade(ctx, cursor_pos, dt);
 
@@ -970,9 +1029,6 @@ impl eframe::App for ImageViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(bg_color))
             .show(ctx, |ui| {
-                if viewer_blocked {
-                    ui.disable();
-                }
                 let viewport = ui.available_rect_before_wrap();
                 let filmstrip_height = self.config.filmstrip.thumbnail_size as f32 + 48.0;
                 let pointer_over_filmstrip = self.config.filmstrip.visibility
@@ -994,7 +1050,10 @@ impl eframe::App for ImageViewerApp {
                     self.current_image.as_ref(),
                     &self.config.rendering,
                     self.config.window.show_checkerboard_for_transparent,
-                    !viewer_blocked && !pointer_over_filmstrip,
+                    CanvasInput {
+                        enabled: !viewer_blocked,
+                        wheel_zoom: !viewer_blocked && !pointer_over_filmstrip,
+                    },
                     (!self.is_loading && self.load_error.is_none()).then(|| {
                         tr(
                             "Open an image or drop it here",
@@ -1004,7 +1063,10 @@ impl eframe::App for ImageViewerApp {
                 );
 
                 // Double-click on canvas action
-                if !viewer_blocked && canvas_resp.double_clicked {
+                if !viewer_blocked
+                    && self.canvas_double_click_ready(ctx)
+                    && canvas_resp.double_clicked
+                {
                     match self.config.window.double_click_action {
                         DoubleClickAction::ToggleWindowMode => {
                             self.toggle_window_mode(ctx);
@@ -1029,6 +1091,11 @@ impl eframe::App for ImageViewerApp {
                         }
                         DoubleClickAction::None => {}
                     }
+                }
+
+                // Disable controls without tinting the image or its crossfade.
+                if viewer_blocked {
+                    ui.disable();
                 }
 
                 // 2. Render Screen Edge Chevrons (< and >)
@@ -1325,26 +1392,14 @@ impl eframe::App for ImageViewerApp {
         }
 
         // 7. Settings Dialog
+        let settings_open_before_show = self.settings_dialog.is_open;
         let outcome =
             self.settings_dialog
                 .show(ctx, &mut self.config, self.presentation.opaque_window());
-        if outcome.changes.filter {
-            if let Err(error) = self
-                .canvas_state
-                .set_filter_mode(ctx, self.config.rendering.filter_mode)
-            {
-                self.image_upload_failed(error);
-            }
+        if settings_open_before_show && !self.settings_dialog.is_open {
+            self.record_settings_close(ctx);
         }
-        if outcome.changes.cache {
-            self.cache.set_capacity(
-                self.config.cache.max_ram_cache_mb,
-                self.config.cache.thumbnail_cache_count,
-            );
-        }
-        if self.window_mode != self.config.window.mode && outcome.changes.any {
-            self.toggle_window_mode(ctx);
-        }
+        self.apply_settings_changes(ctx, outcome.changes);
     }
 }
 
@@ -1537,6 +1592,12 @@ mod tests {
         let _ = ctx.run(Default::default(), |ctx| {
             app.update_ui_fade(ctx, Some(Pos2::new(640.0, 400.0)), 1.0);
         });
+        assert!(app.ui_opacity > 0.0 && app.ui_opacity < 1.0);
+        for _ in 0..90 {
+            let _ = ctx.run(Default::default(), |ctx| {
+                app.update_ui_fade(ctx, Some(Pos2::new(640.0, 400.0)), 1.0 / 60.0);
+            });
+        }
         assert_eq!(app.ui_opacity, 0.0);
     }
 
@@ -1547,6 +1608,183 @@ mod tests {
         assert_eq!(app.clear_color(&egui::Visuals::dark())[3], 0.0);
         app.presentation = PresentationPolicy::with_opaque_window(true);
         assert_eq!(app.clear_color(&egui::Visuals::dark())[3], 1.0);
+    }
+
+    #[test]
+    fn runtime_window_toggles_do_not_change_the_saved_default() {
+        let (mut app, ctx) = test_app();
+        let default_mode = app.config.window.mode;
+        app.toggle_window_mode(&ctx);
+        let runtime_mode = app.window_mode;
+        assert_ne!(runtime_mode, default_mode);
+        assert_eq!(app.config.window.mode, default_mode);
+        app.apply_settings_changes(
+            &ctx,
+            SettingsChanges {
+                any: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(app.window_mode, runtime_mode);
+        app.apply_settings_changes(
+            &ctx,
+            SettingsChanges {
+                window_mode: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(app.window_mode, default_mode);
+    }
+
+    #[test]
+    fn unrelated_settings_do_not_upload_image_pixels() {
+        let (mut app, ctx) = test_app();
+        app.activate_image(PathBuf::from("image.png"), image(0));
+        let _ = ctx.run(Default::default(), |ctx| app.upload_pending_texture(ctx));
+        let image_texture = app.canvas_state.texture.as_ref().unwrap().id();
+        let output = ctx.run(Default::default(), |ctx| {
+            app.apply_settings_changes(
+                ctx,
+                SettingsChanges {
+                    any: true,
+                    ..Default::default()
+                },
+            );
+        });
+        assert!(output
+            .textures_delta
+            .set
+            .iter()
+            .all(|(id, _)| *id != image_texture));
+    }
+
+    #[test]
+    fn a_filter_setting_updates_the_displayed_texture_once() {
+        let (mut app, ctx) = test_app();
+        app.activate_image(PathBuf::from("image.png"), image(0));
+        let _ = ctx.run(Default::default(), |ctx| app.upload_pending_texture(ctx));
+        let image_texture = app.canvas_state.texture.as_ref().unwrap().id();
+        app.config.rendering.filter_mode = crate::config::FilterMode::Nearest;
+        let changes = SettingsChanges {
+            any: true,
+            filter: true,
+            ..Default::default()
+        };
+        let output = ctx.run(Default::default(), |ctx| {
+            app.apply_settings_changes(ctx, changes)
+        });
+        assert_eq!(
+            output
+                .textures_delta
+                .set
+                .iter()
+                .filter(|(id, _)| *id == image_texture)
+                .count(),
+            1
+        );
+        let output = ctx.run(Default::default(), |ctx| {
+            app.apply_settings_changes(ctx, changes)
+        });
+        assert!(output
+            .textures_delta
+            .set
+            .iter()
+            .all(|(id, _)| *id != image_texture));
+    }
+
+    #[test]
+    fn settings_close_disarms_the_second_click_of_a_double_click() {
+        let (mut app, ctx) = test_app();
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(10.0),
+                ..Default::default()
+            },
+            |ctx| {
+                app.record_settings_close(ctx);
+                assert!(!app.canvas_double_click_ready(ctx));
+            },
+        );
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(10.1),
+                ..Default::default()
+            },
+            |ctx| {
+                assert!(!app.canvas_double_click_ready(ctx));
+            },
+        );
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(10.5),
+                ..Default::default()
+            },
+            |ctx| {
+                assert!(app.canvas_double_click_ready(ctx));
+            },
+        );
+    }
+
+    #[test]
+    fn held_escape_cannot_toggle_the_viewer_after_settings_closes() {
+        let (mut app, ctx) = test_app();
+        let initial_mode = app.window_mode;
+        app.settings_dialog.is_open = true;
+        let initial_press = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(initial_press, |ctx| app.handle_keyboard_inputs(ctx));
+        app.settings_dialog.is_open = false;
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.handle_keyboard_inputs(ctx));
+        assert_eq!(app.window_mode, initial_mode);
+    }
+
+    #[test]
+    fn keys_held_in_settings_need_a_fresh_press_before_navigation() {
+        let (mut app, ctx) = test_app();
+        app.navigator.files = vec![PathBuf::from("one.png"), PathBuf::from("two.png")];
+        app.settings_dialog.is_open = true;
+        let key_input = |pressed, repeat| egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::ArrowRight,
+                physical_key: None,
+                pressed,
+                repeat,
+                modifiers: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(key_input(true, false), |ctx| {
+            app.handle_keyboard_inputs(ctx)
+        });
+        app.settings_dialog.is_open = false;
+        app.record_settings_close(&ctx);
+        let _ = ctx.run(key_input(true, true), |ctx| app.handle_keyboard_inputs(ctx));
+        assert_eq!(app.navigator.current_index, 0);
+        let _ = ctx.run(key_input(false, false), |ctx| {
+            app.handle_keyboard_inputs(ctx)
+        });
+        let _ = ctx.run(key_input(true, false), |ctx| {
+            app.handle_keyboard_inputs(ctx)
+        });
+        assert_eq!(app.navigator.current_index, 1);
     }
 
     #[test]

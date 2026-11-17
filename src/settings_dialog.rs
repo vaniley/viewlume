@@ -12,6 +12,7 @@ pub struct SettingsChanges {
     pub any: bool,
     pub filter: bool,
     pub cache: bool,
+    pub window_mode: bool,
 }
 
 impl SettingsChanges {
@@ -27,6 +28,11 @@ impl SettingsChanges {
     fn cache_changed(&mut self) {
         self.changed();
         self.cache = true;
+    }
+
+    fn window_mode_changed(&mut self) {
+        self.changed();
+        self.window_mode = true;
     }
 }
 
@@ -148,17 +154,7 @@ impl SettingsDialog {
         let ru = config.general.language.is_russian();
         let tr = |english: &'static str, russian: &'static str| if ru { russian } else { english };
 
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            if self.reset_pending {
-                self.reset_pending = false;
-                self.reset_focus_requested = false;
-            } else if ctx.memory(|memory| memory.any_popup_open()) {
-                ctx.memory_mut(|memory| memory.close_popup());
-            } else {
-                open = false;
-                outcome.action = SettingsAction::Close;
-            }
-        }
+        self.handle_escape(ctx, &mut open, &mut outcome);
 
         let window = Window::new(tr("Settings", "Настройки"))
             .id(Id::new(SETTINGS_DIALOG_ID))
@@ -279,6 +275,35 @@ impl SettingsDialog {
         error_height + footer_height + ui.spacing().item_spacing.y * 2.0
     }
 
+    fn handle_escape(&mut self, ctx: &Context, open: &mut bool, outcome: &mut SettingsOutcome) {
+        let initial_escape = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    }
+                )
+            })
+        });
+        if !initial_escape {
+            return;
+        }
+
+        if ctx.memory(|memory| memory.any_popup_open()) {
+            ctx.memory_mut(|memory| memory.close_popup());
+        } else if self.reset_pending {
+            self.reset_pending = false;
+            self.reset_focus_requested = false;
+        } else if !ctx.wants_keyboard_input() {
+            *open = false;
+            outcome.action = SettingsAction::Close;
+        }
+    }
+
     fn save_result(&mut self, after_reset: bool, result: Result<(), String>) -> bool {
         match result {
             Ok(()) => {
@@ -301,6 +326,15 @@ impl SettingsDialog {
         self.reset_pending = false;
         self.reset_focus_requested = false;
         self.save_result(true, save(config));
+    }
+
+    fn reset_changes() -> SettingsChanges {
+        SettingsChanges {
+            any: true,
+            filter: true,
+            cache: true,
+            window_mode: true,
+        }
     }
 
     fn category_content(
@@ -363,7 +397,7 @@ impl SettingsDialog {
                     )
                     .changed()
                 {
-                    changes.changed();
+                    changes.window_mode_changed();
                 }
                 if ui
                     .selectable_value(
@@ -373,7 +407,7 @@ impl SettingsDialog {
                     )
                     .changed()
                 {
-                    changes.changed();
+                    changes.window_mode_changed();
                 }
             });
         });
@@ -759,8 +793,12 @@ impl SettingsDialog {
                     *should_close = true;
                     outcome.action = SettingsAction::Close;
                 }
+                let retrying_reset_save = self
+                    .save_error
+                    .as_ref()
+                    .is_some_and(|error| error.after_reset);
                 if ui.button(tr("Save", "Сохранить")).clicked()
-                    && self.save_result(false, config.save())
+                    && self.save_result(retrying_reset_save, config.save())
                 {
                     *should_close = true;
                     outcome.action = SettingsAction::Save;
@@ -796,11 +834,7 @@ impl SettingsDialog {
             }
             if ui.button(tr("Reset", "Сбросить")).clicked() {
                 self.reset_with_save(config, ViewerConfig::save);
-                outcome.changes = SettingsChanges {
-                    any: true,
-                    filter: true,
-                    cache: true,
-                };
+                outcome.changes = Self::reset_changes();
                 outcome.action = SettingsAction::Reset;
             }
         });
@@ -895,6 +929,136 @@ mod tests {
 
         changes.cache_changed();
         assert!(changes.cache);
+
+        let mut window_mode = SettingsChanges::default();
+        window_mode.window_mode_changed();
+        assert_eq!(
+            window_mode,
+            SettingsChanges {
+                any: true,
+                window_mode: true,
+                ..Default::default()
+            }
+        );
+
+        assert_eq!(
+            SettingsDialog::reset_changes(),
+            SettingsChanges {
+                any: true,
+                filter: true,
+                cache: true,
+                window_mode: true,
+            }
+        );
+    }
+
+    #[test]
+    fn escape_prioritizes_popup_reset_text_edit_then_dialog_close() {
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        let mut popup_dialog = SettingsDialog {
+            reset_pending: true,
+            ..Default::default()
+        };
+        let popup_ctx = Context::default();
+        let _ = popup_ctx.run(
+            egui::RawInput {
+                events: vec![escape.clone()],
+                ..Default::default()
+            },
+            |ctx| {
+                ctx.memory_mut(|memory| memory.open_popup(Id::new("test.popup")));
+                let mut open = true;
+                let mut outcome = SettingsOutcome::default();
+                popup_dialog.handle_escape(ctx, &mut open, &mut outcome);
+                assert!(open);
+                assert!(popup_dialog.reset_pending);
+                assert!(!ctx.memory(|memory| memory.any_popup_open()));
+                assert_eq!(outcome.action, SettingsAction::None);
+            },
+        );
+
+        let reset_ctx = Context::default();
+        let _ = reset_ctx.run(
+            egui::RawInput {
+                events: vec![escape.clone()],
+                ..Default::default()
+            },
+            |ctx| {
+                let mut open = true;
+                let mut outcome = SettingsOutcome::default();
+                popup_dialog.handle_escape(ctx, &mut open, &mut outcome);
+                assert!(open);
+                assert!(!popup_dialog.reset_pending);
+                assert_eq!(outcome.action, SettingsAction::None);
+            },
+        );
+
+        let mut focused_dialog = SettingsDialog::default();
+        let focused_ctx = Context::default();
+        let _ = focused_ctx.run(
+            egui::RawInput {
+                events: vec![escape.clone()],
+                ..Default::default()
+            },
+            |ctx| {
+                ctx.memory_mut(|memory| memory.request_focus(Id::new("test.text_edit")));
+                let mut open = true;
+                let mut outcome = SettingsOutcome::default();
+                focused_dialog.handle_escape(ctx, &mut open, &mut outcome);
+                assert!(open);
+                assert_eq!(outcome.action, SettingsAction::None);
+            },
+        );
+
+        let close_ctx = Context::default();
+        let _ = close_ctx.run(
+            egui::RawInput {
+                events: vec![escape.clone()],
+                ..Default::default()
+            },
+            |ctx| {
+                let mut open = true;
+                let mut outcome = SettingsOutcome::default();
+                focused_dialog.handle_escape(ctx, &mut open, &mut outcome);
+                assert!(!open);
+                assert_eq!(outcome.action, SettingsAction::Close);
+            },
+        );
+
+        let repeat_ctx = Context::default();
+        let _ = repeat_ctx.run(
+            egui::RawInput {
+                events: vec![escape.clone()],
+                ..Default::default()
+            },
+            |_| {},
+        );
+        let _ = repeat_ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                let mut open = true;
+                let mut outcome = SettingsOutcome::default();
+                focused_dialog.handle_escape(ctx, &mut open, &mut outcome);
+                assert!(open);
+                assert_eq!(outcome.action, SettingsAction::None);
+            },
+        );
     }
 
     #[test]
@@ -944,6 +1108,16 @@ mod tests {
             config.cache.max_ram_cache_mb,
             ViewerConfig::default().cache.max_ram_cache_mb
         );
+        assert!(dialog
+            .save_error
+            .as_ref()
+            .is_some_and(|error| error.after_reset));
+
+        let retrying_reset_save = dialog
+            .save_error
+            .as_ref()
+            .is_some_and(|error| error.after_reset);
+        assert!(!dialog.save_result(retrying_reset_save, Err("still denied".to_owned())));
         assert!(dialog
             .save_error
             .as_ref()

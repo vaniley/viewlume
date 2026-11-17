@@ -81,7 +81,7 @@ $env:VIEWLUME_OPAQUE_WINDOW = "1"
 .\viewlume.exe
 ```
 
-This is a process-only override: it does not change saved settings. GPU rendering, backend
+Set this variable for each affected launch. It is a process-only override: it does not change saved settings. GPU rendering, backend
 selection, and synchronized presentation remain enabled, but the desktop cannot show through the
 window. It may help transparency/compositor compatibility; it cannot repair an unavailable GPU
 adapter or an unsupported driver.
@@ -141,6 +141,12 @@ Viewlume stores settings in the platform configuration directory:
 
 An existing configuration from the former `image-viewer` name is migrated automatically on first launch.
 The interface supports English and Russian; English is used by default.
+
+### Texture filtering
+
+In Settings > Rendering, Auto uses smooth minification and nearest-neighbor magnification in
+physical display pixels. Display scaling therefore affects the threshold where Auto changes
+behavior. Choose Bilinear for consistently smooth enlargement.
 
 When renderer startup succeeds or fails, Viewlume writes a best-effort diagnostic log beside this
 file as `diagnostics.log` (with one rotated `diagnostics.log.1` file). Each file is limited to

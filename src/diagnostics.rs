@@ -67,6 +67,11 @@ pub fn record_startup_failure(presentation: PresentationPolicy, error: &str) {
     record(entry);
 }
 
+/// Records a generic runtime panic without exposing its payload or source path.
+pub fn record_runtime_panic(presentation: PresentationPolicy, location: Option<(u32, u32)>) {
+    record(runtime_panic_entry(presentation, location));
+}
+
 /// Location beside the existing platform configuration file.
 pub fn diagnostic_path() -> PathBuf {
     let config_path = ViewerConfig::config_path();
@@ -88,6 +93,19 @@ fn startup_header(presentation: PresentationPolicy) -> String {
     )
 }
 
+fn runtime_panic_entry(presentation: PresentationPolicy, location: Option<(u32, u32)>) -> String {
+    let mut entry = format!(
+        "\n=== Viewlume runtime panic ===\napp_version: {}\neffective_native_transparency: {}\nopaque_window_override: {}\nruntime_panic: application panic\n",
+        env!("CARGO_PKG_VERSION"),
+        presentation.transparent_window(),
+        presentation.opaque_window(),
+    );
+    if let Some((line, column)) = location {
+        entry.push_str(&format!("source_location: line={line}, column={column}\n"));
+    }
+    entry
+}
+
 fn requested_backend() -> String {
     std::env::var("WGPU_BACKEND").unwrap_or_else(|_| "automatic (eframe default)".to_owned())
 }
@@ -101,7 +119,12 @@ fn detect_os_version() -> String {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut command = Command::new("cmd");
+    let command_path = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("System32")
+        .join("cmd.exe");
+    let mut command = Command::new(command_path);
     command
         .args(["/D", "/C", "ver"])
         .creation_flags(CREATE_NO_WINDOW);
@@ -176,7 +199,8 @@ fn tail_to_limit(bytes: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_bounded, MAX_DIAGNOSTIC_BYTES};
+    use super::{append_bounded, runtime_panic_entry, MAX_DIAGNOSTIC_BYTES};
+    use crate::presentation::PresentationPolicy;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -228,5 +252,16 @@ mod tests {
         assert!(append_bounded(&not_a_directory.join("diagnostics.log"), "entry\n").is_err());
 
         fs::remove_dir_all(directory).expect("remove diagnostic test directory");
+    }
+
+    #[test]
+    fn runtime_panic_entry_is_generic_and_does_not_include_a_source_path() {
+        let entry =
+            runtime_panic_entry(PresentationPolicy::with_opaque_window(true), Some((42, 7)));
+
+        assert!(entry.contains("runtime_panic: application panic"));
+        assert!(entry.contains("source_location: line=42, column=7"));
+        assert!(!entry.contains("payload"));
+        assert!(!entry.contains("file="));
     }
 }
