@@ -444,7 +444,7 @@ pub fn render_canvas(
     }
     state.is_dragging = dragging;
 
-    if state.animate(dt, render_cfg) {
+    if ui.ctx().output(|output| output.num_completed_passes) == 0 && state.animate(dt, render_cfg) {
         ui.ctx().request_repaint();
     }
 
@@ -836,6 +836,99 @@ mod tests {
                 egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == outgoing_id
             )
         }));
+    }
+
+    #[test]
+    fn multipass_layout_does_not_advance_a_new_transition_twice() {
+        let ctx = egui::Context::default();
+        let first = Arc::new(decoded(2, 2));
+        let second = Arc::new(decoded(2, 2));
+        let frame = Arc::new(ColorImage::new([2, 2], Color32::BLUE));
+        let mut state = CanvasState::default();
+        let config = RenderingConfig {
+            image_transition_ms: 25.0,
+            ..Default::default()
+        };
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let _ = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &first, FilterMode::Auto, true, false)
+                .expect("initial upload");
+            state.reset_view_actual_size(2.0, 2.0, viewport);
+        });
+
+        let mut started_transition = false;
+        let multipass = ctx.run(
+            egui::RawInput {
+                predicted_dt: 1.0 / 60.0,
+                ..input(2048)
+            },
+            |ctx| {
+                if ctx.output(|output| output.num_completed_passes) == 0 {
+                    state
+                        .update_animation_frame(ctx, Arc::clone(&frame))
+                        .expect("partial frame upload");
+                    state
+                        .update_texture(ctx, &second, FilterMode::Auto, true, true)
+                        .expect("crossfade upload");
+                    started_transition = true;
+                    ctx.request_discard("exercise canvas multipass animation guard");
+                }
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_canvas(
+                        ui,
+                        &mut state,
+                        Some(&second),
+                        &config,
+                        false,
+                        CanvasInput {
+                            enabled: true,
+                            wheel_zoom: true,
+                        },
+                        None,
+                    );
+                });
+            },
+        );
+
+        assert!(started_transition);
+        assert_eq!(multipass.platform_output.num_completed_passes, 2);
+        assert!(
+            state.outgoing.is_some(),
+            "the discarded layout pass must not advance the transition a second time"
+        );
+        let progress_after_multipass = state.transition_progress;
+        assert!(
+            progress_after_multipass < 0.3,
+            "only the first pass may advance the clamped 80ms transition"
+        );
+
+        let _ = ctx.run(
+            egui::RawInput {
+                predicted_dt: 1.0 / 60.0,
+                ..input(2048)
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_canvas(
+                        ui,
+                        &mut state,
+                        Some(&second),
+                        &config,
+                        false,
+                        CanvasInput {
+                            enabled: true,
+                            wheel_zoom: true,
+                        },
+                        None,
+                    );
+                });
+            },
+        );
+        assert!(
+            state.transition_progress > progress_after_multipass,
+            "the next GPU frame advances transition"
+        );
     }
 
     #[test]

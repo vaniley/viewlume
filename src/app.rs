@@ -470,6 +470,16 @@ impl ImageViewerApp {
         }
     }
 
+    fn process_frame_results(&mut self, ctx: &Context) {
+        // Layout passes share one texture upload/draw submission. Never clear
+        // handles created or painted by an earlier pass of this same frame.
+        if ctx.output(|output| output.num_completed_passes) == 0 {
+            self.process_queued_open(ctx);
+            self.process_scan_results();
+            self.process_incoming_results(ctx);
+        }
+    }
+
     pub fn prefetch_adjacent(&self) {
         let total = self.navigator.total_count();
         if total <= 1 || self.config.cache.prefetch_count == 0 {
@@ -954,9 +964,8 @@ impl eframe::App for ImageViewerApp {
         let cursor_pos = ctx.input(|i| i.pointer.hover_pos());
 
         // Process async worker responses
-        self.process_queued_open(ctx);
-        self.process_scan_results();
-        self.process_incoming_results(ctx);
+        let first_pass = ctx.output(|output| output.num_completed_passes) == 0;
+        self.process_frame_results(ctx);
         // Handle hotkeys & drag-and-drop
         let settings_was_open = self.settings_dialog.is_open;
         self.handle_keyboard_inputs(ctx);
@@ -980,42 +989,47 @@ impl eframe::App for ImageViewerApp {
             self.handle_drag_and_drop(ctx);
         }
 
-        // Resolve cached opens and queued preview/full results before touching GPU resources.
-        self.upload_pending_texture(ctx);
-        if !self.animation_paused {
-            let next_frame = self.current_image.as_ref().and_then(|image| {
-                let frames = &image.animation_frames;
-                if frames.is_empty() || Instant::now() < self.animation_deadline {
-                    None
-                } else {
-                    self.animation_frame_index = (self.animation_frame_index + 1) % frames.len();
-                    Some(frames[self.animation_frame_index].clone())
+        if first_pass {
+            // Resolve cached opens and queued preview/full results before touching GPU resources.
+            self.upload_pending_texture(ctx);
+            if !self.animation_paused {
+                let next_frame = self.current_image.as_ref().and_then(|image| {
+                    let frames = &image.animation_frames;
+                    if frames.is_empty() || Instant::now() < self.animation_deadline {
+                        None
+                    } else {
+                        self.animation_frame_index =
+                            (self.animation_frame_index + 1) % frames.len();
+                        Some(frames[self.animation_frame_index].clone())
+                    }
+                });
+                if let Some(frame) = next_frame {
+                    self.animation_deadline =
+                        Instant::now() + frame.delay.div_f32(self.animation_speed.clamp(0.25, 4.0));
+                    if let Err(error) = self
+                        .canvas_state
+                        .update_animation_frame(ctx, frame.color_image)
+                    {
+                        self.image_upload_failed(error);
+                    }
                 }
-            });
-            if let Some(frame) = next_frame {
-                self.animation_deadline =
-                    Instant::now() + frame.delay.div_f32(self.animation_speed.clamp(0.25, 4.0));
-                if let Err(error) = self
-                    .canvas_state
-                    .update_animation_frame(ctx, frame.color_image)
+                if self
+                    .current_image
+                    .as_ref()
+                    .is_some_and(|image| !image.animation_frames.is_empty())
                 {
-                    self.image_upload_failed(error);
+                    ctx.request_repaint_after(
+                        self.animation_deadline
+                            .saturating_duration_since(Instant::now()),
+                    );
                 }
-            }
-            if self
-                .current_image
-                .as_ref()
-                .is_some_and(|image| !image.animation_frames.is_empty())
-            {
-                ctx.request_repaint_after(
-                    self.animation_deadline
-                        .saturating_duration_since(Instant::now()),
-                );
             }
         }
 
         // Manage UI auto-fade
-        self.update_ui_fade(ctx, cursor_pos, dt);
+        if first_pass {
+            self.update_ui_fade(ctx, cursor_pos, dt);
+        }
 
         // Draw background — overlay uses semi-transparent dark for see-through darkening,
         // windowed respects transparent_windowed_background config.
@@ -1920,6 +1934,37 @@ mod tests {
             .set
             .iter()
             .all(|(id, _)| *id != texture_id));
+    }
+
+    #[test]
+    fn layout_repasses_do_not_clear_textures_from_the_first_pass() {
+        let (mut app, ctx) = test_app();
+        ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::new(2).unwrap());
+        let path = PathBuf::from("thumbnail.png");
+        let mut passes = 0;
+        let mut id = egui::TextureId::default();
+        let output = ctx.run(Default::default(), |ctx| {
+            app.process_frame_results(ctx);
+            passes += 1;
+            if ctx.output(|output| output.num_completed_passes) == 0 {
+                app.filmstrip_state.insert_loaded_thumbnail(
+                    ctx,
+                    path.clone(),
+                    0,
+                    Arc::new(egui::ColorImage::new([2, 2], Color32::WHITE)),
+                );
+                id = app.filmstrip_state.thumb_textures[&path].id();
+                app.open_target(Path::new("next-folder"), ctx);
+                ctx.request_discard("exercise texture retirement across layout passes");
+            } else {
+                assert!(app.filmstrip_state.thumb_textures.contains_key(&path));
+            }
+        });
+        assert_eq!(passes, 2);
+        assert!(output.textures_delta.set.iter().any(|(set, _)| *set == id));
+        assert!(!output.textures_delta.free.contains(&id));
+        let output = ctx.run(Default::default(), |ctx| app.process_frame_results(ctx));
+        assert!(output.textures_delta.free.contains(&id));
     }
 
     #[test]
