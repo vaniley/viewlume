@@ -205,11 +205,11 @@ pub fn render_edge_chevrons(
     let left_alpha = ((44.0 + left_hover * 142.0 + left_pressed * 36.0) * opacity) as u8;
     let left_fg = ((112.0 + left_hover * 143.0) * opacity) as u8;
     let left_radius = 21.0 + left_hover * 3.0;
-    let left_bg = Color32::from_rgba_premultiplied(22, 25, 32, left_alpha);
+    let left_bg = Color32::from_rgba_unmultiplied(22, 25, 32, left_alpha);
     painter.circle_filled(left_center, left_radius, left_bg);
     let left_stroke = Stroke::new(
         2.2_f32,
-        Color32::from_rgba_premultiplied(255, 255, 255, left_fg),
+        Color32::from_rgba_unmultiplied(255, 255, 255, left_fg),
     );
     let left_shift = -left_hover * 2.0;
     let l_p1 = Pos2::new(left_center.x + 4.0 + left_shift, left_center.y - 10.0);
@@ -224,11 +224,11 @@ pub fn render_edge_chevrons(
     let right_alpha = ((44.0 + right_hover * 142.0 + right_pressed * 36.0) * opacity) as u8;
     let right_fg = ((112.0 + right_hover * 143.0) * opacity) as u8;
     let right_radius = 21.0 + right_hover * 3.0;
-    let right_bg = Color32::from_rgba_premultiplied(22, 25, 32, right_alpha);
+    let right_bg = Color32::from_rgba_unmultiplied(22, 25, 32, right_alpha);
     painter.circle_filled(right_center, right_radius, right_bg);
     let right_stroke = Stroke::new(
         2.2_f32,
-        Color32::from_rgba_premultiplied(255, 255, 255, right_fg),
+        Color32::from_rgba_unmultiplied(255, 255, 255, right_fg),
     );
     let right_shift = right_hover * 2.0;
     let r_p1 = Pos2::new(right_center.x - 4.0 + right_shift, right_center.y - 10.0);

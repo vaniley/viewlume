@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::cache::ImageCache;
-use crate::canvas::{render_canvas, CanvasState};
+use crate::canvas::{render_canvas, CanvasState, TextureSizeError};
 use crate::config::{DoubleClickAction, FilterMode, ViewerConfig, WindowMode};
 use crate::filmstrip::{render_filmstrip, FilmstripState, ScrollNav};
 use crate::loader::decoder::DecodedImage;
@@ -15,6 +15,7 @@ use crate::loader::pipeline::{LoadResult, LoaderPipeline, Priority};
 use crate::navigation::{
     render_edge_chevrons, FolderNavigator, FolderScan, NavAction, SUPPORTED_IMAGE_EXTENSIONS,
 };
+use crate::presentation::PresentationPolicy;
 use crate::settings_dialog::SettingsDialog;
 
 #[derive(Clone, Copy)]
@@ -45,12 +46,12 @@ fn icon_button(
     ui.painter().circle_filled(
         rect.center(),
         18.0 + hover * 1.5,
-        Color32::from_rgba_premultiplied(20, 23, 29, alpha),
+        Color32::from_rgba_unmultiplied(20, 23, 29, alpha),
     );
 
     let center = rect.center();
     let color =
-        Color32::from_rgba_premultiplied(238, 241, 247, ((150.0 + hover * 105.0) * opacity) as u8);
+        Color32::from_rgba_unmultiplied(238, 241, 247, ((150.0 + hover * 105.0) * opacity) as u8);
     let stroke = Stroke::new(1.8_f32, color);
     match icon {
         ToolbarIcon::Open => {
@@ -166,6 +167,9 @@ pub struct ImageViewerApp {
     current_image_path: Option<PathBuf>,
     current_image_is_preview: bool,
     texture_dirty: bool,
+    texture_reset_view: bool,
+    texture_animate: bool,
+    presentation: PresentationPolicy,
     pub is_loading: bool,
     pub load_error: Option<String>,
     pub window_mode: WindowMode,
@@ -196,7 +200,21 @@ impl ImageViewerApp {
         }
     }
 
-    pub fn new(cc: &eframe::CreationContext<'_>, initial_target: Option<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial_target: Option<PathBuf>,
+        config: ViewerConfig,
+        presentation: PresentationPolicy,
+    ) -> Self {
+        Self::with_context(&cc.egui_ctx, initial_target, config, presentation)
+    }
+
+    fn with_context(
+        ctx: &Context,
+        initial_target: Option<PathBuf>,
+        config: ViewerConfig,
+        presentation: PresentationPolicy,
+    ) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = Color32::from_rgb(12, 14, 18);
         visuals.window_fill = Color32::from_rgb(24, 27, 33);
@@ -205,8 +223,7 @@ impl ImageViewerApp {
         visuals.widgets.inactive.rounding = egui::Rounding::same(7.0);
         visuals.widgets.hovered.rounding = egui::Rounding::same(7.0);
         visuals.widgets.active.rounding = egui::Rounding::same(7.0);
-        cc.egui_ctx.set_visuals(visuals);
-        let config = ViewerConfig::load();
+        ctx.set_visuals(visuals);
         let cache = Arc::new(ImageCache::new(
             config.cache.max_ram_cache_mb,
             config.cache.thumbnail_cache_count,
@@ -217,7 +234,7 @@ impl ImageViewerApp {
         let pipeline = LoaderPipeline::new(
             Arc::clone(&cache),
             num_cpus,
-            cc.egui_ctx.clone(),
+            ctx.clone(),
             config.filmstrip.thumbnail_size,
         );
         let (scan_result_tx, scan_result_rx) = unbounded();
@@ -236,6 +253,9 @@ impl ImageViewerApp {
             current_image_path: None,
             current_image_is_preview: false,
             texture_dirty: false,
+            texture_reset_view: true,
+            texture_animate: false,
+            presentation,
             is_loading: false,
             load_error: None,
 
@@ -257,7 +277,7 @@ impl ImageViewerApp {
         };
 
         if let Some(target) = initial_target {
-            app.open_target(&target, &cc.egui_ctx);
+            app.open_target(&target, ctx);
         }
 
         app
@@ -296,8 +316,12 @@ impl ImageViewerApp {
             } else {
                 Priority::Immediate
             };
-            self.pipeline
-                .request_full_image(target, usize::MAX, priority);
+            if let Some(cached) =
+                self.pipeline
+                    .request_full_image(target.clone(), usize::MAX, priority)
+            {
+                self.activate_image(target, cached);
+            }
         } else {
             self.pending_open_path = None;
         }
@@ -336,12 +360,7 @@ impl ImageViewerApp {
 
             // Check if already in cache
             if let Some(cached) = self.cache.get_full(&path) {
-                self.current_image = Some(Arc::clone(&cached));
-                self.current_image_path = Some(path);
-                self.current_image_is_preview = false;
-                self.texture_dirty = true;
-                self.is_loading = false;
-                self.prefetch_adjacent();
+                self.activate_image(path, cached);
             } else {
                 self.is_loading = true;
                 let priority = if self.current_image.is_none() {
@@ -350,11 +369,13 @@ impl ImageViewerApp {
                     Priority::Immediate
                 };
                 // Request immediate load
-                self.pipeline.request_full_image(
+                if let Some(cached) = self.pipeline.request_full_image(
                     path.clone(),
                     self.navigator.current_index,
                     priority,
-                );
+                ) {
+                    self.activate_image(path, cached);
+                }
             }
         } else {
             self.pending_open_path = None;
@@ -362,6 +383,67 @@ impl ImageViewerApp {
             self.current_image_path = None;
             self.current_image_is_preview = false;
             self.is_loading = false;
+        }
+    }
+
+    fn activate_image(&mut self, path: PathBuf, image: Arc<DecodedImage>) {
+        let replacing_preview =
+            self.current_image_is_preview && self.current_image_path.as_ref() == Some(&path);
+        let delay = image
+            .animation_frames
+            .first()
+            .map(|frame| frame.delay)
+            .unwrap_or_default();
+        self.current_image = Some(image);
+        self.current_image_path = Some(path);
+        self.current_image_is_preview = false;
+        self.texture_dirty = true;
+        self.texture_reset_view = !replacing_preview;
+        self.texture_animate =
+            !replacing_preview && self.config.rendering.animate_image_transitions;
+        self.animation_frame_index = 0;
+        self.animation_deadline = Instant::now() + delay;
+        self.animation_paused = false;
+        self.is_loading = false;
+        self.load_error = None;
+        self.pending_open_path = None;
+        self.prefetch_adjacent();
+    }
+
+    fn image_upload_failed(&mut self, error: TextureSizeError) {
+        let TextureSizeError::TooLarge {
+            width,
+            height,
+            max_texture_side,
+        } = error;
+        self.load_error = Some(if self.config.general.language.is_russian() {
+            format!("Размер текстуры {width}×{height} превышает ограничение видеокарты {max_texture_side}×{max_texture_side}.")
+        } else {
+            format!("Image texture {width}×{height} exceeds this GPU's limit of {max_texture_side}×{max_texture_side}.")
+        });
+        self.current_image = None;
+        self.current_image_is_preview = false;
+        self.texture_dirty = false;
+        self.is_loading = false;
+        self.pending_open_path = None;
+        self.canvas_state = CanvasState::default();
+    }
+
+    fn upload_pending_texture(&mut self, ctx: &Context) {
+        if !self.texture_dirty {
+            return;
+        }
+        self.texture_dirty = false;
+        if let Some(image) = self.current_image.as_ref() {
+            if let Err(error) = self.canvas_state.update_texture(
+                ctx,
+                image,
+                self.config.rendering.filter_mode,
+                self.texture_reset_view,
+                self.texture_animate,
+            ) {
+                self.image_upload_failed(error);
+            }
         }
     }
 
@@ -491,6 +573,7 @@ impl ImageViewerApp {
                 );
             }
         }
+        self.config.window.mode = self.window_mode;
     }
 
     pub fn process_incoming_results(&mut self, ctx: &Context) {
@@ -525,13 +608,21 @@ impl ImageViewerApp {
                             color_image: image,
                             animation_frames: Arc::from([]),
                         });
-                        self.canvas_state.update_texture(
-                            ctx,
-                            &preview,
-                            self.config.rendering.filter_mode,
-                            true,
-                            false,
-                        );
+                        if self
+                            .canvas_state
+                            .update_texture(
+                                ctx,
+                                &preview,
+                                self.config.rendering.filter_mode,
+                                true,
+                                false,
+                            )
+                            .is_err()
+                        {
+                            // A preview is optional; the full image follows through
+                            // the normal guarded activation/error path.
+                            continue;
+                        }
                         self.current_image = Some(preview);
                         self.current_image_path = Some(path);
                         self.current_image_is_preview = true;
@@ -558,33 +649,7 @@ impl ImageViewerApp {
                         self.is_loading = false;
                         match result {
                             Ok(img) => {
-                                let initial_animation_delay = img
-                                    .animation_frames
-                                    .first()
-                                    .map(|frame| frame.delay)
-                                    .unwrap_or_default();
-                                let replacing_preview = self.current_image_is_preview
-                                    && self.current_image_path.as_ref() == Some(&path);
-                                self.canvas_state.update_texture(
-                                    ctx,
-                                    &img,
-                                    self.config.rendering.filter_mode,
-                                    !replacing_preview,
-                                    !replacing_preview
-                                        && self.config.rendering.animate_image_transitions,
-                                );
-                                self.current_image = Some(img);
-                                self.animation_frame_index = 0;
-                                self.animation_deadline = Instant::now() + initial_animation_delay;
-                                self.animation_paused = false;
-                                self.current_image_path = Some(path.clone());
-                                self.current_image_is_preview = false;
-                                self.texture_dirty = false;
-                                self.load_error = None;
-                                if matches_pending {
-                                    self.pending_open_path = None;
-                                }
-                                self.prefetch_adjacent();
+                                self.activate_image(path, img);
                             }
                             Err(e) => {
                                 self.load_error = Some(e);
@@ -627,6 +692,9 @@ impl ImageViewerApp {
     }
 
     pub fn handle_keyboard_inputs(&mut self, ctx: &Context) {
+        if self.settings_dialog.is_open {
+            return;
+        }
         let (
             left_pressed,
             right_pressed,
@@ -738,14 +806,11 @@ impl ImageViewerApp {
                 FilterMode::Nearest => self.tr("Filter: Nearest", "Фильтр: без сглаживания"),
                 FilterMode::Bilinear => self.tr("Filter: Bilinear", "Фильтр: билинейный"),
             };
-            if let Some(ref img) = self.current_image {
-                self.canvas_state.update_texture(
-                    ctx,
-                    img,
-                    self.config.rendering.filter_mode,
-                    false,
-                    false,
-                );
+            if let Err(error) = self
+                .canvas_state
+                .set_filter_mode(ctx, self.config.rendering.filter_mode)
+            {
+                self.image_upload_failed(error);
             }
             self.show_toast(label);
         }
@@ -755,6 +820,9 @@ impl ImageViewerApp {
     }
 
     pub fn handle_drag_and_drop(&mut self, ctx: &Context) {
+        if self.settings_dialog.is_open {
+            return;
+        }
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
             if let Some(path) = file.path {
@@ -772,8 +840,13 @@ impl ImageViewerApp {
         }
 
         let elapsed = self.last_mouse_activity.elapsed().as_secs_f32();
+        let timeout = self.config.window.ui_fade_timeout_secs.max(0.0);
+        if self.config.window.auto_hide_ui && elapsed < timeout && !self.settings_dialog.is_open {
+            ctx.request_repaint_after(Duration::from_secs_f32(timeout - elapsed));
+        }
         let target_opacity = if !self.config.window.auto_hide_ui
-            || elapsed < self.config.window.ui_fade_timeout_secs
+            || self.settings_dialog.is_open
+            || elapsed < timeout
         {
             1.0_f32
         } else {
@@ -796,13 +869,19 @@ impl ImageViewerApp {
         self.ui_opacity += (target_opacity - self.ui_opacity) * (fade_speed * dt).min(1.0_f32);
         if (self.ui_opacity - target_opacity).abs() > 0.01 {
             ctx.request_repaint();
+        } else {
+            self.ui_opacity = target_opacity;
         }
     }
 }
 
 impl eframe::App for ImageViewerApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        if self.presentation.opaque_window() {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            [0.0, 0.0, 0.0, 0.0]
+        }
     }
 
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
@@ -814,41 +893,45 @@ impl eframe::App for ImageViewerApp {
         // Process async worker responses
         self.process_scan_results();
         self.process_incoming_results(ctx);
+        self.upload_pending_texture(ctx);
         if !self.animation_paused {
-            if let Some(image) = self.current_image.as_ref() {
+            let next_frame = self.current_image.as_ref().and_then(|image| {
                 let frames = &image.animation_frames;
-                if !frames.is_empty() && Instant::now() >= self.animation_deadline {
+                if frames.is_empty() || Instant::now() < self.animation_deadline {
+                    None
+                } else {
                     self.animation_frame_index = (self.animation_frame_index + 1) % frames.len();
-                    let frame = &frames[self.animation_frame_index];
-                    self.canvas_state
-                        .update_animation_frame(ctx, Arc::clone(&frame.color_image));
-                    self.animation_deadline =
-                        Instant::now() + frame.delay.div_f32(self.animation_speed.clamp(0.25, 4.0));
+                    Some(frames[self.animation_frame_index].clone())
                 }
-                if !frames.is_empty() {
-                    ctx.request_repaint_after(
-                        self.animation_deadline
-                            .saturating_duration_since(Instant::now()),
-                    );
+            });
+            if let Some(frame) = next_frame {
+                self.animation_deadline =
+                    Instant::now() + frame.delay.div_f32(self.animation_speed.clamp(0.25, 4.0));
+                if let Err(error) = self
+                    .canvas_state
+                    .update_animation_frame(ctx, frame.color_image)
+                {
+                    self.image_upload_failed(error);
                 }
             }
-        }
-        if self.texture_dirty {
-            if let Some(image) = self.current_image.as_ref() {
-                self.canvas_state.update_texture(
-                    ctx,
-                    image,
-                    self.config.rendering.filter_mode,
-                    true,
-                    self.config.rendering.animate_image_transitions,
+            if self
+                .current_image
+                .as_ref()
+                .is_some_and(|image| !image.animation_frames.is_empty())
+            {
+                ctx.request_repaint_after(
+                    self.animation_deadline
+                        .saturating_duration_since(Instant::now()),
                 );
             }
-            self.texture_dirty = false;
         }
 
         // Handle hotkeys & drag-and-drop
+        let settings_was_open = self.settings_dialog.is_open;
         self.handle_keyboard_inputs(ctx);
-        if ctx.input(|input| input.key_pressed(egui::Key::Space))
+        let viewer_blocked = settings_was_open || self.settings_dialog.is_open;
+        if !viewer_blocked
+            && ctx.input(|input| input.key_pressed(egui::Key::Space))
             && self
                 .current_image
                 .as_ref()
@@ -862,15 +945,18 @@ impl eframe::App for ImageViewerApp {
                 self.tr("Animation playing", "Анимация воспроизводится")
             });
         }
-        self.handle_drag_and_drop(ctx);
+        if !viewer_blocked {
+            self.handle_drag_and_drop(ctx);
+        }
 
         // Manage UI auto-fade
         self.update_ui_fade(ctx, cursor_pos, dt);
 
         // Draw background — overlay uses semi-transparent dark for see-through darkening,
         // windowed respects transparent_windowed_background config.
-        let bg_color = if self.window_mode == WindowMode::Overlay
-            || self.config.window.transparent_windowed_background
+        let bg_color = if !self.presentation.opaque_window()
+            && (self.window_mode == WindowMode::Overlay
+                || self.config.window.transparent_windowed_background)
         {
             let c = self.config.window.bg_color;
             Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
@@ -884,6 +970,9 @@ impl eframe::App for ImageViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(bg_color))
             .show(ctx, |ui| {
+                if viewer_blocked {
+                    ui.disable();
+                }
                 let viewport = ui.available_rect_before_wrap();
                 let filmstrip_height = self.config.filmstrip.thumbnail_size as f32 + 48.0;
                 let pointer_over_filmstrip = self.config.filmstrip.visibility
@@ -905,7 +994,7 @@ impl eframe::App for ImageViewerApp {
                     self.current_image.as_ref(),
                     &self.config.rendering,
                     self.config.window.show_checkerboard_for_transparent,
-                    !pointer_over_filmstrip,
+                    !viewer_blocked && !pointer_over_filmstrip,
                     (!self.is_loading && self.load_error.is_none()).then(|| {
                         tr(
                             "Open an image or drop it here",
@@ -915,7 +1004,7 @@ impl eframe::App for ImageViewerApp {
                 );
 
                 // Double-click on canvas action
-                if canvas_resp.double_clicked {
+                if !viewer_blocked && canvas_resp.double_clicked {
                     match self.config.window.double_click_action {
                         DoubleClickAction::ToggleWindowMode => {
                             self.toggle_window_mode(ctx);
@@ -1104,7 +1193,7 @@ impl eframe::App for ImageViewerApp {
                         ui.painter().rect(
                             badge_rect,
                             6.0_f32,
-                            Color32::from_rgba_premultiplied(18, 18, 22, badge_alpha),
+                            Color32::from_rgba_unmultiplied(18, 18, 22, badge_alpha),
                             Stroke::NONE,
                         );
 
@@ -1113,7 +1202,7 @@ impl eframe::App for ImageViewerApp {
                             egui::Align2::CENTER_CENTER,
                             info_text,
                             egui::FontId::proportional(12.0),
-                            Color32::from_rgba_premultiplied(220, 220, 230, badge_alpha),
+                            Color32::from_rgba_unmultiplied(220, 220, 230, badge_alpha),
                         );
                     }
                 }
@@ -1129,10 +1218,10 @@ impl eframe::App for ImageViewerApp {
                         ui.painter().rect(
                             text_rect,
                             8.0_f32,
-                            Color32::from_rgba_premultiplied(24, 24, 28, toast_alpha),
+                            Color32::from_rgba_unmultiplied(24, 24, 28, toast_alpha),
                             Stroke::new(
                                 1.0_f32,
-                                Color32::from_rgba_premultiplied(255, 255, 255, toast_alpha / 4),
+                                Color32::from_rgba_unmultiplied(255, 255, 255, toast_alpha / 4),
                             ),
                         );
                         ui.painter().text(
@@ -1140,7 +1229,7 @@ impl eframe::App for ImageViewerApp {
                             egui::Align2::CENTER_CENTER,
                             msg,
                             egui::FontId::proportional(13.0),
-                            Color32::from_rgba_premultiplied(255, 255, 255, toast_alpha),
+                            Color32::from_rgba_unmultiplied(255, 255, 255, toast_alpha),
                         );
                         ctx.request_repaint();
                     } else {
@@ -1158,8 +1247,11 @@ impl eframe::App for ImageViewerApp {
             egui::Area::new(egui::Id::new("animation-controls"))
                 .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(16.0, -16.0))
                 .show(ctx, |ui| {
+                    if viewer_blocked {
+                        ui.disable();
+                    }
                     egui::Frame::none()
-                        .fill(Color32::from_rgba_premultiplied(18, 20, 25, 232))
+                        .fill(Color32::from_rgba_unmultiplied(18, 20, 25, 232))
                         .rounding(8.0)
                         .inner_margin(8.0)
                         .show(ui, |ui| {
@@ -1202,6 +1294,9 @@ impl eframe::App for ImageViewerApp {
                 .resizable(false)
                 .fixed_size(Vec2::new(420.0, 150.0))
                 .show(ctx, |ui| {
+                    if viewer_blocked {
+                        ui.disable();
+                    }
                     ui.spacing_mut().interact_size.y = 44.0;
                     if let Some(path) = self.current_image_path.as_ref() {
                         ui.strong(path.file_name().unwrap_or_default().to_string_lossy());
@@ -1230,17 +1325,25 @@ impl eframe::App for ImageViewerApp {
         }
 
         // 7. Settings Dialog
-        if self.settings_dialog.show(ctx, &mut self.config) {
-            // Re-apply settings if changed
-            if let Some(ref img) = self.current_image {
-                self.canvas_state.update_texture(
-                    ctx,
-                    img,
-                    self.config.rendering.filter_mode,
-                    false,
-                    false,
-                );
+        let outcome =
+            self.settings_dialog
+                .show(ctx, &mut self.config, self.presentation.opaque_window());
+        if outcome.changes.filter {
+            if let Err(error) = self
+                .canvas_state
+                .set_filter_mode(ctx, self.config.rendering.filter_mode)
+            {
+                self.image_upload_failed(error);
             }
+        }
+        if outcome.changes.cache {
+            self.cache.set_capacity(
+                self.config.cache.max_ram_cache_mb,
+                self.config.cache.thumbnail_cache_count,
+            );
+        }
+        if self.window_mode != self.config.window.mode && outcome.changes.any {
+            self.toggle_window_mode(ctx);
         }
     }
 }
@@ -1248,6 +1351,217 @@ impl eframe::App for ImageViewerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_app() -> (ImageViewerApp, Context) {
+        let ctx = Context::default();
+        let app = ImageViewerApp::with_context(
+            &ctx,
+            None,
+            ViewerConfig::default(),
+            PresentationPolicy::with_opaque_window(false),
+        );
+        (app, ctx)
+    }
+
+    fn image(frame_count: usize) -> Arc<DecodedImage> {
+        let pixels = Arc::new(egui::ColorImage::new([2, 2], Color32::WHITE));
+        Arc::new(DecodedImage {
+            width: 2,
+            height: 2,
+            bytes_size: 16,
+            color_image: Arc::clone(&pixels),
+            animation_frames: (0..frame_count)
+                .map(|_| crate::loader::decoder::AnimationFrame {
+                    color_image: Arc::clone(&pixels),
+                    delay: Duration::from_millis(100),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        })
+    }
+
+    #[test]
+    fn cached_activation_resets_animation_and_clears_pending_load() {
+        let (mut app, _) = test_app();
+        app.animation_frame_index = 12;
+        app.animation_paused = true;
+        app.animation_deadline = Instant::now() - Duration::from_secs(1);
+        app.is_loading = true;
+        app.load_error = Some("previous error".into());
+        app.pending_open_path = Some(PathBuf::from("cached.gif"));
+        app.activate_image(PathBuf::from("cached.gif"), image(2));
+        assert_eq!(app.animation_frame_index, 0);
+        assert!(!app.animation_paused);
+        assert!(app.animation_deadline > Instant::now());
+        assert!(!app.is_loading);
+        assert!(app.pending_open_path.is_none());
+        assert!(app.load_error.is_none());
+        assert!(app.texture_dirty);
+    }
+
+    #[test]
+    fn reopening_a_cached_file_activates_without_waiting_for_worker_result() {
+        let (mut app, ctx) = test_app();
+        let path = std::env::temp_dir().join(format!("viewlume-reopen-{}.png", std::process::id()));
+        std::fs::write(&path, b"cache fingerprint fixture").unwrap();
+        let path = std::fs::canonicalize(path).unwrap();
+        let cached = image(0);
+        app.cache.insert_full(path.clone(), Arc::clone(&cached));
+        app.open_target(&path, &ctx);
+        assert!(Arc::ptr_eq(app.current_image.as_ref().unwrap(), &cached));
+        assert_eq!(app.current_image_path.as_ref(), Some(&path));
+        assert!(!app.is_loading);
+        assert!(app.pending_open_path.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn preview_to_full_keeps_the_existing_view() {
+        let (mut app, _) = test_app();
+        let path = PathBuf::from("image.png");
+        app.current_image_is_preview = true;
+        app.current_image_path = Some(path.clone());
+        app.activate_image(path, image(0));
+        assert!(!app.texture_reset_view);
+        assert!(!app.texture_animate);
+    }
+
+    #[test]
+    fn old_worker_results_cannot_replace_a_new_cached_image() {
+        let (mut app, ctx) = test_app();
+        let path = PathBuf::from("selected.gif");
+        let selected = image(2);
+        app.navigator.files = vec![path.clone()];
+        app.activate_image(path.clone(), Arc::clone(&selected));
+        let old_epoch = app.pipeline.current_epoch();
+        app.pipeline.next_epoch();
+        app.pending_load_results.push_back(LoadResult::FullImage {
+            path,
+            index: 0,
+            epoch: old_epoch,
+            result: Ok(image(10)),
+        });
+        app.process_incoming_results(&ctx);
+        assert!(Arc::ptr_eq(app.current_image.as_ref().unwrap(), &selected));
+        assert_eq!(app.animation_frame_index, 0);
+    }
+
+    #[test]
+    fn cached_navigation_resets_shorter_animation() {
+        let (mut app, _) = test_app();
+        let path = std::env::temp_dir().join(format!(
+            "viewlume-animation-cache-{}.gif",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"fingerprint").unwrap();
+        app.navigator.files = vec![path.clone()];
+        let cached = image(2);
+        app.cache.insert_full(path.clone(), Arc::clone(&cached));
+        app.current_image = Some(image(12));
+        app.animation_frame_index = 11;
+        app.animation_paused = true;
+        app.load_current_image(true);
+        assert!(Arc::ptr_eq(app.current_image.as_ref().unwrap(), &cached));
+        assert_eq!(app.animation_frame_index, 0);
+        assert!(!app.animation_paused);
+        assert!(!app.is_loading);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn settings_block_viewer_keys_and_file_drops() {
+        let (mut app, ctx) = test_app();
+        app.settings_dialog.is_open = true;
+        app.navigator.files = vec![PathBuf::from("one.png"), PathBuf::from("two.png")];
+        let original_mode = app.window_mode;
+        let original_filter = app.config.rendering.filter_mode;
+        let events = [
+            egui::Key::ArrowRight,
+            egui::Key::F11,
+            egui::Key::N,
+            egui::Key::Escape,
+            egui::Key::S,
+        ]
+        .into_iter()
+        .map(|key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        })
+        .collect();
+        let input = egui::RawInput {
+            events,
+            dropped_files: vec![egui::DroppedFile {
+                path: Some(PathBuf::from("replacement.png")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            app.handle_keyboard_inputs(ctx);
+            app.handle_drag_and_drop(ctx);
+        });
+        assert_eq!(app.navigator.current_index, 0);
+        assert_eq!(app.window_mode, original_mode);
+        assert_eq!(app.config.rendering.filter_mode, original_filter);
+        assert_eq!(app.scan_generation, 0);
+        assert!(app.settings_dialog.is_open);
+    }
+
+    #[test]
+    fn inactivity_schedules_a_future_repaint_and_fade_settles() {
+        let (mut app, ctx) = test_app();
+        app.config.window.ui_fade_timeout_secs = 2.0;
+        for _ in 0..3 {
+            let _ = ctx.run(Default::default(), |ctx| {
+                app.update_ui_fade(ctx, Some(Pos2::new(640.0, 400.0)), 0.016);
+            });
+        }
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                app.update_ui_fade(ctx, Some(Pos2::new(640.0, 400.0)), 0.016);
+            },
+        );
+        let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(
+            delay > Duration::ZERO && delay <= Duration::from_secs(2),
+            "{delay:?}"
+        );
+        app.last_mouse_activity = Instant::now() - Duration::from_secs(3);
+        let _ = ctx.run(Default::default(), |ctx| {
+            app.update_ui_fade(ctx, Some(Pos2::new(640.0, 400.0)), 1.0);
+        });
+        assert_eq!(app.ui_opacity, 0.0);
+    }
+
+    #[test]
+    fn opaque_native_policy_always_clears_opaque() {
+        let (mut app, _) = test_app();
+        use eframe::App;
+        assert_eq!(app.clear_color(&egui::Visuals::dark())[3], 0.0);
+        app.presentation = PresentationPolicy::with_opaque_window(true);
+        assert_eq!(app.clear_color(&egui::Visuals::dark())[3], 1.0);
+    }
+
+    #[test]
+    fn invalid_gpu_upload_becomes_an_image_error() {
+        let (mut app, ctx) = test_app();
+        let mut oversized = (*image(0)).clone();
+        let side = ctx.input(|input| input.max_texture_side) + 1;
+        oversized.color_image = Arc::new(egui::ColorImage::new([side, 1], Color32::WHITE));
+        app.activate_image(PathBuf::from("panorama.png"), Arc::new(oversized));
+        app.upload_pending_texture(&ctx);
+        assert!(app.load_error.is_some());
+        assert!(app.current_image.is_none());
+        assert!(app.canvas_state.texture.is_none());
+        assert!(!app.is_loading);
+    }
 
     #[test]
     fn rapid_navigation_expands_prefetch_in_travel_direction() {

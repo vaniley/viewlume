@@ -232,7 +232,7 @@ pub fn render_filmstrip(
                     ui.painter().rect_filled(
                         Rect::from_center_size(center, Vec2::splat(draw_size * 0.82)),
                         6.0,
-                        Color32::from_rgba_premultiplied(150, 158, 174, 32),
+                        Color32::from_rgba_unmultiplied(150, 158, 174, 32),
                     );
                 }
 
@@ -242,8 +242,6 @@ pub fn render_filmstrip(
                         2.5,
                         Color32::from_rgb(96, 165, 250),
                     );
-                } else if response.hovered() {
-                    ui.ctx().request_repaint();
                 }
             }
         });
