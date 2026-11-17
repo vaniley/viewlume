@@ -65,6 +65,27 @@ sudo dnf install wayland-devel libxkbcommon gtk3
 3. Run `viewlume.exe`. No extra dependencies required.
 4. Optionally add the folder to `PATH` (Settings > System > Advanced > Environment Variables > Path).
 
+#### Opaque-window compatibility launch
+
+Viewlume normally creates a transparent-capable native window for its overlay mode. If a Windows
+compositor or driver has trouble starting that window, launch one process with an opaque native
+window instead:
+
+```console
+# Command Prompt
+set VIEWLUME_OPAQUE_WINDOW=1
+viewlume.exe
+
+# PowerShell
+$env:VIEWLUME_OPAQUE_WINDOW = "1"
+.\viewlume.exe
+```
+
+Set this variable for each affected launch. It is a process-only override: it does not change saved settings. GPU rendering, backend
+selection, and synchronized presentation remain enabled, but the desktop cannot show through the
+window. It may help transparency/compositor compatibility; it cannot repair an unavailable GPU
+adapter or an unsupported driver.
+
 ### Usage
 
 ```console
@@ -120,6 +141,18 @@ Viewlume stores settings in the platform configuration directory:
 
 An existing configuration from the former `image-viewer` name is migrated automatically on first launch.
 The interface supports English and Russian; English is used by default.
+
+### Texture filtering
+
+In Settings > Rendering, Auto uses smooth minification and nearest-neighbor magnification in
+physical display pixels. Display scaling therefore affects the threshold where Auto changes
+behavior. Choose Bilinear for consistently smooth enlargement.
+
+When renderer startup succeeds or fails, Viewlume writes a best-effort diagnostic log beside this
+file as `diagnostics.log` (with one rotated `diagnostics.log.1` file). Each file is limited to
+256 KiB. The log records app/OS versions, requested and selected renderer backends, adapter and
+effective device-limit details, the native transparency policy, and startup errors. It never logs
+image paths or image contents; an inability to write the log does not prevent startup.
 
 ## Contributing
 

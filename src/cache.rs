@@ -47,9 +47,15 @@ pub struct ImageCache {
     thumb_cache: Cache<PathBuf, CachedThumbnail>,
 }
 
+fn cache_bytes(max_ram_mb: usize) -> u64 {
+    u64::try_from(max_ram_mb)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(1024 * 1024)
+}
+
 impl ImageCache {
     pub fn new(max_ram_mb: usize, max_thumbs: usize) -> Self {
-        let max_bytes = (max_ram_mb * 1024 * 1024) as u64;
+        let max_bytes = cache_bytes(max_ram_mb);
         let full_cache = Cache::with_weighter(128, max_bytes, ImageWeighter);
 
         let thumb_cache = Cache::new(max_thumbs);
@@ -58,6 +64,14 @@ impl ImageCache {
             full_cache,
             thumb_cache,
         }
+    }
+
+    /// Changes decoded-image cache capacity, not the total process memory limit.
+    /// Keep the shared cache alive so workers observe the new budget too.
+    pub fn set_capacity(&self, max_ram_mb: usize, max_thumbs: usize) {
+        self.full_cache.set_capacity(cache_bytes(max_ram_mb));
+        self.thumb_cache
+            .set_capacity(u64::try_from(max_thumbs).unwrap_or(u64::MAX));
     }
 
     pub fn get_full(&self, path: &Path) -> Option<Arc<DecodedImage>> {
@@ -119,6 +133,49 @@ mod tests {
             color_image: Arc::new(egui::ColorImage::new([1, 1], egui::Color32::WHITE)),
             animation_frames: Arc::from([]),
         })
+    }
+
+    #[test]
+    fn capacity_updates_preserve_the_shared_cache() {
+        let cache = Arc::new(ImageCache::new(4, 8));
+        let worker = Arc::clone(&cache);
+        cache.set_capacity(1, 2);
+        assert!(Arc::ptr_eq(&cache, &worker));
+        assert_eq!(worker.full_cache.capacity(), 1024 * 1024);
+        assert_eq!(worker.thumb_cache.capacity(), 2);
+        worker.set_capacity(8, 16);
+        assert_eq!(cache.full_cache.capacity(), 8 * 1024 * 1024);
+        assert_eq!(cache.thumb_cache.capacity(), 16);
+    }
+
+    #[test]
+    fn memory_budget_conversion_saturates() {
+        assert_eq!(cache_bytes(1), 1024 * 1024);
+        assert_eq!(cache_bytes(0), 0);
+        assert!(cache_bytes(usize::MAX) >= usize::MAX as u64);
+    }
+
+    #[test]
+    fn smaller_budget_evicts_decoded_images() {
+        let cache = ImageCache::new(4, 8);
+        let mut fixture = (*decoded()).clone();
+        fixture.bytes_size = 512 * 1024;
+        for index in 0..12 {
+            cache.full_cache.insert(
+                PathBuf::from(format!("{index}.png")),
+                CachedImage {
+                    fingerprint: FileFingerprint {
+                        len: 0,
+                        modified: None,
+                    },
+                    image: Arc::new(fixture.clone()),
+                },
+            );
+        }
+        assert!(cache.full_cache.weight() > 1024 * 1024);
+        cache.set_capacity(1, 4);
+        assert!(cache.full_cache.weight() <= cache.full_cache.capacity());
+        assert!(cache.full_cache.weight() <= 1024 * 1024);
     }
 
     #[test]

@@ -1,4 +1,6 @@
-use egui::{Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, Vec2};
+use egui::{
+    Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureId, TextureOptions, Ui, Vec2,
+};
 use std::sync::Arc;
 
 use crate::config::{FilterMode, RenderingConfig};
@@ -8,6 +10,32 @@ struct OutgoingImage {
     texture: TextureHandle,
     rect: Rect,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextureSizeError {
+    TooLarge {
+        width: usize,
+        height: usize,
+        max_texture_side: usize,
+    },
+}
+
+impl std::fmt::Display for TextureSizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge {
+                width,
+                height,
+                max_texture_side,
+            } => write!(
+                f,
+                "Image texture is {width}×{height}, but this renderer supports at most {max_texture_side}×{max_texture_side}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TextureSizeError {}
 
 pub struct CanvasState {
     pub pan: Vec2,
@@ -26,6 +54,9 @@ pub struct CanvasState {
     transition_progress: f32,
     transition_direction: f32,
     texture_sequence: u64,
+    texture_options: Option<TextureOptions>,
+    displayed_pixels: Option<Arc<ColorImage>>,
+    checkerboard: Option<TextureHandle>,
 }
 
 impl Default for CanvasState {
@@ -47,6 +78,9 @@ impl Default for CanvasState {
             transition_progress: 1.0,
             transition_direction: 1.0,
             texture_sequence: 0,
+            texture_options: None,
+            displayed_pixels: None,
+            checkerboard: None,
         }
     }
 }
@@ -125,18 +159,72 @@ impl CanvasState {
         self.set_view(img_w, img_h, viewport, scale, center);
     }
 
-    pub fn get_texture_options(filter_mode: FilterMode, scale: f64) -> TextureOptions {
+    pub fn get_texture_options(filter_mode: FilterMode, _scale: f64) -> TextureOptions {
         match filter_mode {
             FilterMode::Nearest => TextureOptions::NEAREST,
             FilterMode::Bilinear => TextureOptions::LINEAR,
-            FilterMode::Auto if scale >= 1.0 => TextureOptions {
+            FilterMode::Auto => TextureOptions {
                 magnification: egui::TextureFilter::Nearest,
                 minification: egui::TextureFilter::Linear,
                 wrap_mode: egui::TextureWrapMode::ClampToEdge,
                 mipmap_mode: None,
             },
-            FilterMode::Auto => TextureOptions::LINEAR,
         }
+    }
+
+    fn texture_options_changed(&self, options: TextureOptions) -> bool {
+        self.texture_options != Some(options)
+    }
+
+    fn validate_texture_size(
+        ctx: &egui::Context,
+        pixels: &ColorImage,
+    ) -> Result<(), TextureSizeError> {
+        let [width, height] = pixels.size;
+        let max_texture_side = ctx.input(|input| input.max_texture_side);
+        if width > max_texture_side || height > max_texture_side {
+            return Err(TextureSizeError::TooLarge {
+                width,
+                height,
+                max_texture_side,
+            });
+        }
+        Ok(())
+    }
+
+    fn upload_pixels(
+        &mut self,
+        ctx: &egui::Context,
+        pixels: Arc<ColorImage>,
+        options: TextureOptions,
+        needs_new_texture: bool,
+    ) -> Result<(), TextureSizeError> {
+        Self::validate_texture_size(ctx, &pixels)?;
+
+        let size_changed = self
+            .texture
+            .as_ref()
+            .is_none_or(|texture| texture.size() != pixels.size);
+        if needs_new_texture || self.texture.is_none() {
+            self.texture_sequence += 1;
+            self.texture = Some(ctx.load_texture(
+                format!("active-image-{}", self.texture_sequence),
+                pixels.clone(),
+                options,
+            ));
+        } else if let Some(texture) = self.texture.as_mut() {
+            if size_changed {
+                // Keep the managed ID alive when a preview is replaced by its full image in the
+                // same egui frame. Egui-wgpu destroys freed managed textures before submitting
+                // their queued uploads, so replacing this handle here can destroy its upload.
+                texture.set(pixels.clone(), options);
+            } else {
+                texture.set_partial([0, 0], pixels.clone(), options);
+            }
+        }
+        self.texture_options = Some(options);
+        self.displayed_pixels = Some(pixels);
+        Ok(())
     }
 
     pub fn update_texture(
@@ -146,8 +234,21 @@ impl CanvasState {
         filter_mode: FilterMode,
         is_new_image: bool,
         animate: bool,
-    ) {
+    ) -> Result<(), TextureSizeError> {
         let options = Self::get_texture_options(filter_mode, self.target_scale);
+        Self::validate_texture_size(ctx, &image.color_image)?;
+
+        // Filter changes apply to the pixels on screen. In particular, do not replace an
+        // active animation frame with the decoded still image when a shortcut is pressed.
+        if !is_new_image && self.current_filter != filter_mode {
+            return self.set_filter_mode(ctx, filter_mode);
+        }
+
+        let pixels_changed = self
+            .displayed_pixels
+            .as_ref()
+            .is_none_or(|displayed| !Arc::ptr_eq(displayed, &image.color_image));
+        let options_changed = self.texture_options_changed(options);
         if is_new_image {
             if animate {
                 if let Some(texture) = self.texture.take() {
@@ -162,51 +263,66 @@ impl CanvasState {
                 self.outgoing = None;
                 self.transition_progress = 1.0;
             }
-            self.texture_sequence += 1;
-            self.texture = Some(ctx.load_texture(
-                format!("active-image-{}", self.texture_sequence),
-                image.color_image.clone(),
-                options,
-            ));
+            let needs_new_texture = animate && self.outgoing.is_some();
+            self.upload_pixels(ctx, image.color_image.clone(), options, needs_new_texture)?;
             self.initialized = false;
-        } else if let Some(texture) = self.texture.as_mut() {
-            texture.set(image.color_image.clone(), options);
-            self.outgoing = None;
-            self.transition_progress = 1.0;
-        } else {
-            self.texture_sequence += 1;
-            self.texture = Some(ctx.load_texture(
-                format!("active-image-{}", self.texture_sequence),
-                image.color_image.clone(),
-                options,
-            ));
+        } else if pixels_changed || options_changed || self.texture.is_none() {
+            self.upload_pixels(ctx, image.color_image.clone(), options, false)?;
         }
         self.current_filter = filter_mode;
+        Ok(())
     }
 
-    pub fn sync_texture_options(&mut self, image: Option<&Arc<DecodedImage>>) {
-        if self.current_filter == FilterMode::Auto {
-            let options = Self::get_texture_options(self.current_filter, self.target_scale);
-            if let Some(texture) = self.texture.as_mut() {
-                if let Some(image) = image {
-                    texture.set(image.color_image.clone(), options);
-                }
+    pub fn set_filter_mode(
+        &mut self,
+        ctx: &egui::Context,
+        filter_mode: FilterMode,
+    ) -> Result<(), TextureSizeError> {
+        self.current_filter = filter_mode;
+        self.sync_texture_options(ctx)
+    }
+
+    fn sync_texture_options(&mut self, ctx: &egui::Context) -> Result<(), TextureSizeError> {
+        let filter_mode = self.current_filter;
+        let options = Self::get_texture_options(filter_mode, self.target_scale);
+        if self.texture_options_changed(options) {
+            if let Some(pixels) = self.displayed_pixels.clone() {
+                self.upload_pixels(ctx, pixels, options, false)?;
             }
         }
+        Ok(())
     }
 
-    pub fn update_animation_frame(&mut self, ctx: &egui::Context, frame: Arc<egui::ColorImage>) {
+    pub fn update_animation_frame(
+        &mut self,
+        ctx: &egui::Context,
+        frame: Arc<ColorImage>,
+    ) -> Result<(), TextureSizeError> {
         let options = Self::get_texture_options(self.current_filter, self.target_scale);
-        if let Some(texture) = self.texture.as_mut() {
-            texture.set(frame, options);
-        } else {
-            self.texture_sequence += 1;
-            self.texture = Some(ctx.load_texture(
-                format!("active-image-{}", self.texture_sequence),
-                frame,
-                options,
-            ));
-        }
+        self.upload_pixels(ctx, frame, options, false)
+    }
+
+    fn checkerboard_texture(&mut self, ctx: &egui::Context) -> TextureId {
+        let texture = self.checkerboard.get_or_insert_with(|| {
+            let mut image = ColorImage::new([2, 2], Color32::from_gray(32));
+            image.pixels = vec![
+                Color32::from_gray(32),
+                Color32::from_gray(22),
+                Color32::from_gray(22),
+                Color32::from_gray(32),
+            ];
+            ctx.load_texture(
+                "checkerboard",
+                image,
+                TextureOptions {
+                    magnification: egui::TextureFilter::Nearest,
+                    minification: egui::TextureFilter::Nearest,
+                    wrap_mode: egui::TextureWrapMode::Repeat,
+                    mipmap_mode: None,
+                },
+            )
+        });
+        texture.id()
     }
 
     fn animate(&mut self, dt: f32, cfg: &RenderingConfig) -> bool {
@@ -240,7 +356,7 @@ impl CanvasState {
             if cfg.animate_image_transitions {
                 let duration = (cfg.image_transition_ms / 1000.0).clamp(0.08, 0.6);
                 self.transition_progress = (self.transition_progress + dt / duration).min(1.0);
-                moving = self.transition_progress < 1.0;
+                moving |= self.transition_progress < 1.0;
             } else {
                 self.transition_progress = 1.0;
             }
@@ -256,16 +372,29 @@ pub struct CanvasResponse {
     pub double_clicked: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CanvasInput {
+    pub enabled: bool,
+    pub wheel_zoom: bool,
+}
+
 pub fn render_canvas(
     ui: &mut Ui,
     state: &mut CanvasState,
     current_image: Option<&Arc<DecodedImage>>,
     render_cfg: &RenderingConfig,
     show_checkerboard: bool,
-    allow_wheel_zoom: bool,
+    input: CanvasInput,
     empty_hint: Option<&str>,
 ) -> CanvasResponse {
-    let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+    let allow_input = input.enabled;
+    let allow_wheel_zoom = input.wheel_zoom;
+    let sense = if allow_input {
+        Sense::click_and_drag()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(ui.available_size(), sense);
     let painter = ui.painter_at(rect);
     let cursor_pos = ui.input(|i| i.pointer.hover_pos());
     let dt = ui.input(|i| i.unstable_dt).clamp(1.0 / 240.0, 1.0 / 20.0);
@@ -273,12 +402,14 @@ pub fn render_canvas(
     if let Some(image) = current_image {
         if !state.initialized {
             state.initialize_image(image.width as f32, image.height as f32, rect, render_cfg);
-            state.sync_texture_options(current_image);
         }
+        // A filter selection is applied to the current GPU pixels once. Auto options are
+        // scale-independent, so all subsequent zoom work remains sampler/upload free.
+        let _ = state.sync_texture_options(ui.ctx());
     }
 
     let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
-    if scroll_delta != 0.0 && response.hovered() && allow_wheel_zoom {
+    if scroll_delta != 0.0 && response.hovered() && allow_input && allow_wheel_zoom {
         if let Some(mouse_pos) = cursor_pos {
             let steps = (scroll_delta / 70.0).clamp(-4.0, 4.0) as f64;
             let exponent = if render_cfg.reverse_zoom_direction {
@@ -295,13 +426,13 @@ pub fn render_canvas(
                     mouse - (mouse - state.target_pan) * (new_target / old_target) as f32;
             }
             state.target_scale = new_target;
-            state.sync_texture_options(current_image);
         }
     }
 
-    let dragging = response.dragged_by(egui::PointerButton::Primary)
-        || response.dragged_by(egui::PointerButton::Secondary)
-        || response.dragged_by(egui::PointerButton::Middle);
+    let dragging = allow_input
+        && (response.dragged_by(egui::PointerButton::Primary)
+            || response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle));
     if dragging {
         // pointer.delta is per-frame; Response::drag_delta is cumulative and caused runaway panning.
         let delta = ui.input(|i| i.pointer.delta());
@@ -313,24 +444,26 @@ pub fn render_canvas(
     }
     state.is_dragging = dragging;
 
-    if state.animate(dt, render_cfg) {
+    if ui.ctx().output(|output| output.num_completed_passes) == 0 && state.animate(dt, render_cfg) {
         ui.ctx().request_repaint();
     }
 
-    if let Some(outgoing) = state.outgoing.as_ref() {
-        let t = state.transition_progress;
-        let eased = 1.0 - (1.0 - t).powi(3);
-        let offset = Vec2::new(-state.transition_direction * 28.0 * eased, 0.0);
-        painter.image(
-            outgoing.texture.id(),
-            outgoing.rect.translate(offset),
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::from_white_alpha(((1.0 - eased) * 255.0) as u8),
-        );
+    if current_image.is_some() {
+        if let Some(outgoing) = state.outgoing.as_ref() {
+            let t = state.transition_progress;
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let offset = Vec2::new(-state.transition_direction * 28.0 * eased, 0.0);
+            painter.image(
+                outgoing.texture.id(),
+                outgoing.rect.translate(offset),
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::from_white_alpha(((1.0 - eased) * 255.0) as u8),
+            );
+        }
     }
 
     if let Some(image) = current_image {
-        if let Some(texture) = state.texture.as_ref() {
+        if let Some(texture_id) = state.texture.as_ref().map(TextureHandle::id) {
             let size = Vec2::new(image.width as f32, image.height as f32) * state.scale as f32;
             let mut image_rect = Rect::from_min_size(state.pan.to_pos2(), size);
             let transition = if state.outgoing.is_some() {
@@ -348,30 +481,23 @@ pub fn render_canvas(
             if show_checkerboard && rect.intersects(image_rect) {
                 let intersect = rect.intersect(image_rect);
                 let cell_size = 16.0 * (state.scale as f32).clamp(0.5, 2.0);
-                let cols = ((intersect.width() / cell_size).ceil() as usize).min(120);
-                let rows = ((intersect.height() / cell_size).ceil() as usize).min(120);
-                for row in 0..rows {
-                    for col in 0..cols {
-                        let min = Pos2::new(
-                            intersect.min.x + col as f32 * cell_size,
-                            intersect.min.y + row as f32 * cell_size,
-                        );
-                        let max = Pos2::new(
-                            (min.x + cell_size).min(intersect.max.x),
-                            (min.y + cell_size).min(intersect.max.y),
-                        );
-                        let color = if (row + col) % 2 == 0 {
-                            Color32::from_gray(32)
-                        } else {
-                            Color32::from_gray(22)
-                        };
-                        painter.rect_filled(Rect::from_min_max(min, max), 0.0, color);
-                    }
-                }
+                let tile_size = cell_size * 2.0;
+                painter.image(
+                    state.checkerboard_texture(ui.ctx()),
+                    intersect,
+                    Rect::from_min_max(
+                        Pos2::ZERO,
+                        Pos2::new(
+                            intersect.width() / tile_size,
+                            intersect.height() / tile_size,
+                        ),
+                    ),
+                    Color32::WHITE,
+                );
             }
 
             painter.image(
-                texture.id(),
+                texture_id,
                 image_rect,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::from_white_alpha((transition * 255.0) as u8),
@@ -388,7 +514,7 @@ pub fn render_canvas(
     }
 
     CanvasResponse {
-        double_clicked: response.double_clicked(),
+        double_clicked: allow_input && response.double_clicked(),
     }
 }
 
@@ -397,16 +523,50 @@ mod tests {
     use super::*;
 
     fn decoded(width: u32, height: u32) -> DecodedImage {
+        decoded_with_pixels(width, height, width, height, Color32::WHITE)
+    }
+
+    fn decoded_with_pixels(
+        width: u32,
+        height: u32,
+        pixel_width: u32,
+        pixel_height: u32,
+        color: Color32,
+    ) -> DecodedImage {
         DecodedImage {
             width,
             height,
-            bytes_size: (width * height * 4) as usize,
+            bytes_size: (pixel_width * pixel_height * 4) as usize,
             color_image: Arc::new(egui::ColorImage::new(
-                [width as usize, height as usize],
-                Color32::WHITE,
+                [pixel_width as usize, pixel_height as usize],
+                color,
             )),
             animation_frames: Arc::from([]),
         }
+    }
+
+    fn input(max_texture_side: usize) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            max_texture_side: Some(max_texture_side),
+            ..Default::default()
+        }
+    }
+
+    fn input_with_events(max_texture_side: usize, events: Vec<egui::Event>) -> egui::RawInput {
+        let mut input = input(max_texture_side);
+        input.events = events;
+        input
+    }
+
+    fn texture_delta(output: &egui::FullOutput, id: TextureId) -> &egui::epaint::ImageDelta {
+        &output
+            .textures_delta
+            .set
+            .iter()
+            .find(|(texture_id, _)| *texture_id == id)
+            .expect("active texture delta")
+            .1
     }
 
     #[test]
@@ -438,8 +598,499 @@ mod tests {
     fn texture_options_auto_mode() {
         let opts_scaled_up = CanvasState::get_texture_options(FilterMode::Auto, 2.0);
         assert_eq!(opts_scaled_up.magnification, egui::TextureFilter::Nearest);
+        assert_eq!(opts_scaled_up.minification, egui::TextureFilter::Linear);
+        assert_eq!(opts_scaled_up.mipmap_mode, None);
 
         let opts_scaled_down = CanvasState::get_texture_options(FilterMode::Auto, 0.5);
-        assert_eq!(opts_scaled_down.magnification, egui::TextureFilter::Linear);
+        assert_eq!(opts_scaled_down, opts_scaled_up);
+    }
+
+    #[test]
+    fn rejects_actual_pixel_buffers_above_the_renderer_limit() {
+        const LIMIT: usize = 2048;
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        let below = Arc::new(decoded((LIMIT - 1) as u32, 1));
+        let at_limit = Arc::new(decoded(LIMIT as u32, 1));
+        let above = Arc::new(decoded((LIMIT + 1) as u32, 1));
+        let long_narrow = Arc::new(decoded(1, (LIMIT + 1) as u32));
+        // Preview metadata can retain the original dimensions while its actual upload buffer is
+        // within the renderer limit.
+        let small_preview = Arc::new(decoded_with_pixels(10_000, 500, 64, 4, Color32::WHITE));
+
+        for image in [below, at_limit, small_preview] {
+            let _ = ctx.run(input(LIMIT), |ctx| {
+                state
+                    .update_texture(ctx, &image, FilterMode::Auto, true, false)
+                    .expect("buffer must fit the renderer limit");
+            });
+        }
+        for image in [above, long_narrow] {
+            let _ = ctx.run(input(LIMIT), |ctx| {
+                assert_eq!(
+                    state.update_texture(ctx, &image, FilterMode::Auto, true, false),
+                    Err(TextureSizeError::TooLarge {
+                        width: image.color_image.size[0],
+                        height: image.color_image.size[1],
+                        max_texture_side: LIMIT,
+                    })
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn unchanged_zoom_and_filter_do_not_upload_image_pixels() {
+        let ctx = egui::Context::default();
+        let image = Arc::new(decoded(16, 16));
+        let mut state = CanvasState::default();
+        let _ = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &image, FilterMode::Auto, true, false)
+                .expect("initial upload");
+        });
+        let texture_id = state.texture.as_ref().expect("active texture").id();
+
+        state.reset_view_actual_size(
+            16.0,
+            16.0,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)),
+        );
+        state.target_scale = 2.0;
+        let output = ctx.run(input(2048), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_canvas(
+                    ui,
+                    &mut state,
+                    Some(&image),
+                    &RenderingConfig::default(),
+                    false,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: true,
+                    },
+                    None,
+                );
+            });
+        });
+        assert!(
+            output
+                .textures_delta
+                .set
+                .iter()
+                .all(|(id, _)| *id != texture_id),
+            "zooming with fixed Auto options must not upload image pixels"
+        );
+
+        state
+            .set_filter_mode(&ctx, FilterMode::Auto)
+            .expect("unchanged filter");
+        let output = ctx.run(input(2048), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_canvas(
+                    ui,
+                    &mut state,
+                    Some(&image),
+                    &RenderingConfig::default(),
+                    false,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: true,
+                    },
+                    None,
+                );
+            });
+        });
+        assert!(output
+            .textures_delta
+            .set
+            .iter()
+            .all(|(id, _)| *id != texture_id));
+    }
+
+    #[test]
+    fn filter_change_keeps_the_displayed_animation_frame_and_uses_partial_upload() {
+        let ctx = egui::Context::default();
+        let image = Arc::new(decoded(2, 2));
+        let frame = Arc::new(ColorImage::new([2, 2], Color32::BLUE));
+        let mut state = CanvasState::default();
+        let _ = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &image, FilterMode::Auto, true, false)
+                .expect("initial upload");
+        });
+        let texture_id = state.texture.as_ref().expect("active texture").id();
+
+        let frame_output = ctx.run(input(2048), |ctx| {
+            state
+                .update_animation_frame(ctx, Arc::clone(&frame))
+                .expect("same-size animation frame");
+        });
+        assert_eq!(texture_delta(&frame_output, texture_id).pos, Some([0, 0]));
+
+        state
+            .set_filter_mode(&ctx, FilterMode::Nearest)
+            .expect("filter change");
+        let filter_output = ctx.run(input(2048), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_canvas(
+                    ui,
+                    &mut state,
+                    Some(&image),
+                    &RenderingConfig::default(),
+                    false,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: true,
+                    },
+                    None,
+                );
+            });
+        });
+        let delta = texture_delta(&filter_output, texture_id);
+        assert_eq!(delta.pos, Some([0, 0]));
+        match &delta.image {
+            egui::ImageData::Color(pixels) => assert_eq!(pixels.pixels[0], Color32::BLUE),
+            egui::ImageData::Font(_) => panic!("active image must remain a color texture"),
+        }
+    }
+
+    #[test]
+    fn preview_to_full_size_change_keeps_its_managed_texture_alive() {
+        let ctx = egui::Context::default();
+        let preview = Arc::new(decoded_with_pixels(64, 64, 2, 2, Color32::WHITE));
+        let full = Arc::new(decoded(64, 64));
+        let mut state = CanvasState::default();
+        let output = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &preview, FilterMode::Auto, true, false)
+                .expect("preview upload");
+            let preview_texture = state.texture.as_ref().expect("preview texture").id();
+            state
+                .update_texture(ctx, &full, FilterMode::Auto, false, false)
+                .expect("full image upload");
+            assert_eq!(
+                state.texture.as_ref().expect("full texture").id(),
+                preview_texture,
+                "a same-frame full image must retain the preview managed texture"
+            );
+        });
+
+        let texture_id = state.texture.as_ref().expect("active texture").id();
+        assert!(
+            output
+                .textures_delta
+                .set
+                .iter()
+                .any(|(id, _)| *id == texture_id),
+            "the final full-image delta must be present"
+        );
+        assert!(
+            !output.textures_delta.free.contains(&texture_id),
+            "a managed texture cannot be freed in the frame that uploads it"
+        );
+    }
+
+    #[test]
+    fn outgoing_texture_is_not_painted_without_a_current_image() {
+        let ctx = egui::Context::default();
+        let first = Arc::new(decoded(2, 2));
+        let second = Arc::new(decoded(2, 2));
+        let mut state = CanvasState::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let _ = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &first, FilterMode::Auto, true, false)
+                .expect("initial upload");
+            state.reset_view_actual_size(2.0, 2.0, viewport);
+            state
+                .update_texture(ctx, &second, FilterMode::Auto, true, true)
+                .expect("transition upload");
+        });
+        let outgoing_id = state
+            .outgoing
+            .as_ref()
+            .expect("outgoing texture")
+            .texture
+            .id();
+
+        let output = ctx.run(input(2048), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_canvas(
+                    ui,
+                    &mut state,
+                    None,
+                    &RenderingConfig::default(),
+                    false,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: true,
+                    },
+                    None,
+                );
+            });
+        });
+        assert!(output.shapes.iter().all(|clipped| {
+            !matches!(
+                &clipped.shape,
+                egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == outgoing_id
+            )
+        }));
+    }
+
+    #[test]
+    fn multipass_layout_does_not_advance_a_new_transition_twice() {
+        let ctx = egui::Context::default();
+        let first = Arc::new(decoded(2, 2));
+        let second = Arc::new(decoded(2, 2));
+        let frame = Arc::new(ColorImage::new([2, 2], Color32::BLUE));
+        let mut state = CanvasState::default();
+        let config = RenderingConfig {
+            image_transition_ms: 25.0,
+            ..Default::default()
+        };
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let _ = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &first, FilterMode::Auto, true, false)
+                .expect("initial upload");
+            state.reset_view_actual_size(2.0, 2.0, viewport);
+        });
+
+        let mut started_transition = false;
+        let multipass = ctx.run(
+            egui::RawInput {
+                predicted_dt: 1.0 / 60.0,
+                ..input(2048)
+            },
+            |ctx| {
+                if ctx.output(|output| output.num_completed_passes) == 0 {
+                    state
+                        .update_animation_frame(ctx, Arc::clone(&frame))
+                        .expect("partial frame upload");
+                    state
+                        .update_texture(ctx, &second, FilterMode::Auto, true, true)
+                        .expect("crossfade upload");
+                    started_transition = true;
+                    ctx.request_discard("exercise canvas multipass animation guard");
+                }
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_canvas(
+                        ui,
+                        &mut state,
+                        Some(&second),
+                        &config,
+                        false,
+                        CanvasInput {
+                            enabled: true,
+                            wheel_zoom: true,
+                        },
+                        None,
+                    );
+                });
+            },
+        );
+
+        assert!(started_transition);
+        assert_eq!(multipass.platform_output.num_completed_passes, 2);
+        assert!(
+            state.outgoing.is_some(),
+            "the discarded layout pass must not advance the transition a second time"
+        );
+        let progress_after_multipass = state.transition_progress;
+        assert!(
+            progress_after_multipass < 0.3,
+            "only the first pass may advance the clamped 80ms transition"
+        );
+
+        let _ = ctx.run(
+            egui::RawInput {
+                predicted_dt: 1.0 / 60.0,
+                ..input(2048)
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_canvas(
+                        ui,
+                        &mut state,
+                        Some(&second),
+                        &config,
+                        false,
+                        CanvasInput {
+                            enabled: true,
+                            wheel_zoom: true,
+                        },
+                        None,
+                    );
+                });
+            },
+        );
+        assert!(
+            state.transition_progress > progress_after_multipass,
+            "the next GPU frame advances transition"
+        );
+    }
+
+    #[test]
+    fn checkerboard_shape_count_is_constant_for_large_images() {
+        fn shape_count(image: Arc<DecodedImage>) -> usize {
+            let ctx = egui::Context::default();
+            let mut state = CanvasState::default();
+            let _ = ctx.run(input(16_384), |ctx| {
+                state
+                    .update_texture(ctx, &image, FilterMode::Auto, true, false)
+                    .expect("initial upload");
+            });
+            ctx.run(input(16_384), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_canvas(
+                        ui,
+                        &mut state,
+                        Some(&image),
+                        &RenderingConfig::default(),
+                        true,
+                        CanvasInput {
+                            enabled: true,
+                            wheel_zoom: true,
+                        },
+                        None,
+                    );
+                });
+            })
+            .shapes
+            .len()
+        }
+
+        assert_eq!(
+            shape_count(Arc::new(decoded(100, 100))),
+            shape_count(Arc::new(decoded_with_pixels(
+                10_000,
+                10_000,
+                2,
+                2,
+                Color32::WHITE,
+            )))
+        );
+    }
+
+    #[test]
+    fn bottom_band_dragging_stays_enabled_when_only_wheel_zoom_is_blocked() {
+        let ctx = egui::Context::default();
+        let image = Arc::new(decoded(16, 16));
+        let mut state = CanvasState::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let start = Pos2::new(400.0, 550.0);
+        let mid = Pos2::new(440.0, 550.0);
+        let end = Pos2::new(480.0, 550.0);
+
+        let _ = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &image, FilterMode::Auto, true, false)
+                .expect("initial upload");
+        });
+        state.reset_view_actual_size(16.0, 16.0, viewport);
+        let initial_pan = state.pan;
+
+        // Egui registers the canvas interaction ID during a frame before it can receive a
+        // subsequent pointer press, mirroring the native app's already-running canvas.
+        let _ = ctx.run(input(2048), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_canvas(
+                    ui,
+                    &mut state,
+                    Some(&image),
+                    &RenderingConfig::default(),
+                    false,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: false,
+                    },
+                    None,
+                );
+            });
+        });
+
+        let _ = ctx.run(
+            input_with_events(
+                2048,
+                vec![
+                    egui::Event::PointerMoved(start),
+                    egui::Event::PointerButton {
+                        pos: start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            ),
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_canvas(
+                        ui,
+                        &mut state,
+                        Some(&image),
+                        &RenderingConfig::default(),
+                        false,
+                        CanvasInput {
+                            enabled: true,
+                            wheel_zoom: false,
+                        },
+                        None,
+                    );
+                });
+            },
+        );
+        for position in [mid, end] {
+            let _ = ctx.run(
+                input_with_events(2048, vec![egui::Event::PointerMoved(position)]),
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        render_canvas(
+                            ui,
+                            &mut state,
+                            Some(&image),
+                            &RenderingConfig::default(),
+                            false,
+                            CanvasInput {
+                                enabled: true,
+                                wheel_zoom: false,
+                            },
+                            None,
+                        );
+                    });
+                },
+            );
+        }
+
+        assert!(
+            state.pan.x > initial_pan.x,
+            "dragging in the filmstrip wheel-only zone must still pan the canvas"
+        );
+    }
+
+    #[test]
+    fn completing_a_transition_does_not_stop_zoom_motion() {
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        let first = Arc::new(decoded(2, 2));
+        let second = Arc::new(decoded(2, 2));
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 100.0));
+        state.reset_view_actual_size(2.0, 2.0, viewport);
+        let _ = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &first, FilterMode::Auto, true, false)
+                .expect("initial upload");
+            state
+                .update_texture(ctx, &second, FilterMode::Auto, true, true)
+                .expect("transition upload");
+        });
+        state.target_scale = 2.0;
+
+        let moving = state.animate(0.2, &RenderingConfig::default());
+        assert!(
+            moving,
+            "zoom motion must continue after the crossfade completes"
+        );
+        assert!(state.outgoing.is_none());
     }
 }
