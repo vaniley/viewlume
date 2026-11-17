@@ -185,6 +185,7 @@ pub struct ImageViewerApp {
     scan_result_rx: Receiver<ScanResult>,
     scan_generation: u64,
     pending_open_path: Option<PathBuf>,
+    queued_open_target: Option<PathBuf>,
     navigation_pace: NavigationPace,
     pending_load_results: VecDeque<LoadResult>,
     animation_frame_index: usize,
@@ -272,6 +273,7 @@ impl ImageViewerApp {
             scan_result_rx,
             scan_generation: 0,
             pending_open_path: None,
+            queued_open_target: None,
             navigation_pace: NavigationPace::default(),
             pending_load_results: VecDeque::new(),
             animation_frame_index: 0,
@@ -288,6 +290,19 @@ impl ImageViewerApp {
     }
 
     pub fn open_target(&mut self, path: &Path, ctx: &Context) {
+        // Open actions can originate after filmstrip meshes have been painted.
+        // Keep their texture handles alive until this frame has been submitted.
+        self.queued_open_target = Some(path.to_path_buf());
+        ctx.request_repaint();
+    }
+
+    fn process_queued_open(&mut self, ctx: &Context) {
+        if let Some(path) = self.queued_open_target.take() {
+            self.open_target_now(&path, ctx);
+        }
+    }
+
+    fn open_target_now(&mut self, path: &Path, ctx: &Context) {
         let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let generation = self.scan_generation;
@@ -430,7 +445,11 @@ impl ImageViewerApp {
         self.texture_dirty = false;
         self.is_loading = false;
         self.pending_open_path = None;
-        self.canvas_state = CanvasState::default();
+        // Do not free a texture in the same frame as a filter/preview upload.
+        // egui-wgpu 0.29 destroys freed textures before submitting queued writes.
+        // Keep the bounded canvas assets; no image is painted while this is None.
+        self.canvas_state.initialized = false;
+        self.canvas_state.is_dragging = false;
     }
 
     fn upload_pending_texture(&mut self, ctx: &Context) {
@@ -611,25 +630,13 @@ impl ImageViewerApp {
                             color_image: image,
                             animation_frames: Arc::from([]),
                         });
-                        if self
-                            .canvas_state
-                            .update_texture(
-                                ctx,
-                                &preview,
-                                self.config.rendering.filter_mode,
-                                true,
-                                false,
-                            )
-                            .is_err()
-                        {
-                            // A preview is optional; the full image follows through
-                            // the normal guarded activation/error path.
-                            continue;
-                        }
                         self.current_image = Some(preview);
                         self.current_image_path = Some(path);
                         self.current_image_is_preview = true;
-                        self.texture_dirty = false;
+                        // Coalesce queued preview/full results before any GPU upload.
+                        self.texture_dirty = true;
+                        self.texture_reset_view = true;
+                        self.texture_animate = false;
                         ctx.request_repaint();
                     }
                 }
@@ -947,8 +954,33 @@ impl eframe::App for ImageViewerApp {
         let cursor_pos = ctx.input(|i| i.pointer.hover_pos());
 
         // Process async worker responses
+        self.process_queued_open(ctx);
         self.process_scan_results();
         self.process_incoming_results(ctx);
+        // Handle hotkeys & drag-and-drop
+        let settings_was_open = self.settings_dialog.is_open;
+        self.handle_keyboard_inputs(ctx);
+        let viewer_blocked = settings_was_open || self.settings_dialog.is_open;
+        if !viewer_blocked
+            && ctx.input(|input| input.key_pressed(egui::Key::Space))
+            && self
+                .current_image
+                .as_ref()
+                .is_some_and(|image| !image.animation_frames.is_empty())
+        {
+            self.animation_paused = !self.animation_paused;
+            self.animation_deadline = Instant::now();
+            self.show_toast(if self.animation_paused {
+                self.tr("Animation paused", "Анимация на паузе")
+            } else {
+                self.tr("Animation playing", "Анимация воспроизводится")
+            });
+        }
+        if !viewer_blocked {
+            self.handle_drag_and_drop(ctx);
+        }
+
+        // Resolve cached opens and queued preview/full results before touching GPU resources.
         self.upload_pending_texture(ctx);
         if !self.animation_paused {
             let next_frame = self.current_image.as_ref().and_then(|image| {
@@ -981,32 +1013,6 @@ impl eframe::App for ImageViewerApp {
                 );
             }
         }
-
-        // Handle hotkeys & drag-and-drop
-        let settings_was_open = self.settings_dialog.is_open;
-        self.handle_keyboard_inputs(ctx);
-        let viewer_blocked = settings_was_open || self.settings_dialog.is_open;
-        if !viewer_blocked
-            && ctx.input(|input| input.key_pressed(egui::Key::Space))
-            && self
-                .current_image
-                .as_ref()
-                .is_some_and(|image| !image.animation_frames.is_empty())
-        {
-            self.animation_paused = !self.animation_paused;
-            self.animation_deadline = Instant::now();
-            self.show_toast(if self.animation_paused {
-                self.tr("Animation paused", "Анимация на паузе")
-            } else {
-                self.tr("Animation playing", "Анимация воспроизводится")
-            });
-        }
-        if !viewer_blocked {
-            self.handle_drag_and_drop(ctx);
-        }
-
-        // Keyboard navigation may activate a cache hit after the first upload.
-        self.upload_pending_texture(ctx);
 
         // Manage UI auto-fade
         self.update_ui_fade(ctx, cursor_pos, dt);
@@ -1463,6 +1469,7 @@ mod tests {
         let cached = image(0);
         app.cache.insert_full(path.clone(), Arc::clone(&cached));
         app.open_target(&path, &ctx);
+        app.process_queued_open(&ctx);
         assert!(Arc::ptr_eq(app.current_image.as_ref().unwrap(), &cached));
         assert_eq!(app.current_image_path.as_ref(), Some(&path));
         assert!(!app.is_loading);
@@ -1799,6 +1806,120 @@ mod tests {
         assert!(app.current_image.is_none());
         assert!(app.canvas_state.texture.is_none());
         assert!(!app.is_loading);
+    }
+
+    #[test]
+    fn queued_preview_and_full_image_upload_only_the_final_pixels() {
+        let (mut app, ctx) = test_app();
+        let path = PathBuf::from("image.png");
+        app.navigator.files = vec![path.clone()];
+        let epoch = app.pipeline.current_epoch();
+        let full = image(0);
+        app.pending_load_results.push_back(LoadResult::Preview {
+            path: path.clone(),
+            index: 0,
+            epoch,
+            width: 2,
+            height: 2,
+            image: Arc::new(egui::ColorImage::new([1, 1], Color32::GRAY)),
+        });
+        app.pending_load_results.push_back(LoadResult::FullImage {
+            path,
+            index: 0,
+            epoch,
+            result: Ok(Arc::clone(&full)),
+        });
+        let output = ctx.run(Default::default(), |ctx| {
+            app.process_incoming_results(ctx);
+            assert!(
+                app.canvas_state.texture.is_none(),
+                "result polling must not allocate textures"
+            );
+            app.upload_pending_texture(ctx);
+        });
+        let id = app.canvas_state.texture.as_ref().unwrap().id();
+        assert_eq!(app.canvas_state.texture.as_ref().unwrap().size(), [2, 2]);
+        assert_eq!(
+            output
+                .textures_delta
+                .set
+                .iter()
+                .filter(|(texture, _)| *texture == id)
+                .count(),
+            1
+        );
+        assert!(output.textures_delta.free.is_empty());
+        assert!(Arc::ptr_eq(app.current_image.as_ref().unwrap(), &full));
+    }
+
+    #[test]
+    fn upload_error_does_not_free_a_texture_with_pending_writes() {
+        let (mut app, ctx) = test_app();
+        let output = ctx.run(Default::default(), |ctx| {
+            app.activate_image(PathBuf::from("valid.png"), image(0));
+            app.upload_pending_texture(ctx);
+            let mut oversized = (*image(0)).clone();
+            let side = ctx.input(|input| input.max_texture_side) + 1;
+            oversized.color_image = Arc::new(egui::ColorImage::new([side, 1], Color32::WHITE));
+            app.activate_image(PathBuf::from("oversized.png"), Arc::new(oversized));
+            app.upload_pending_texture(ctx);
+        });
+        assert!(app.load_error.is_some());
+        assert!(app.current_image.is_none());
+        assert!(
+            app.canvas_state.texture.is_some(),
+            "retain bounded GPU assets until safe reuse"
+        );
+        for id in output.textures_delta.free {
+            assert!(
+                output.textures_delta.set.iter().all(|(set, _)| *set != id),
+                "freeing an uploaded managed texture before submit destroys its queued writes"
+            );
+        }
+    }
+
+    #[test]
+    fn open_actions_retain_uploaded_and_painted_thumbnails_until_next_frame() {
+        let (mut app, ctx) = test_app();
+        let path = PathBuf::from("thumbnail.png");
+        let mut texture_id = egui::TextureId::default();
+        let output = ctx.run(Default::default(), |ctx| {
+            app.filmstrip_state.insert_loaded_thumbnail(
+                ctx,
+                path.clone(),
+                0,
+                Arc::new(egui::ColorImage::new([2, 2], Color32::WHITE)),
+            );
+            texture_id = app.filmstrip_state.thumb_textures[&path].id();
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.painter().image(
+                    texture_id,
+                    Rect::from_min_size(Pos2::ZERO, Vec2::splat(20.0)),
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                app.open_target(Path::new("next-folder"), ctx);
+            });
+            assert!(app.filmstrip_state.thumb_textures.contains_key(&path));
+        });
+        assert!(output
+            .textures_delta
+            .set
+            .iter()
+            .any(|(id, _)| *id == texture_id));
+        assert!(!output.textures_delta.free.contains(&texture_id));
+        let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+        assert!(primitives.iter().any(|primitive| matches!(
+            &primitive.primitive, egui::epaint::Primitive::Mesh(mesh) if mesh.texture_id == texture_id
+        )));
+        let output = ctx.run(Default::default(), |ctx| app.process_queued_open(ctx));
+        assert!(!app.filmstrip_state.thumb_textures.contains_key(&path));
+        assert!(output.textures_delta.free.contains(&texture_id));
+        assert!(output
+            .textures_delta
+            .set
+            .iter()
+            .all(|(id, _)| *id != texture_id));
     }
 
     #[test]

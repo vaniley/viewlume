@@ -277,9 +277,15 @@ impl FilmstripState {
         index: usize,
         thumb: Arc<egui::ColorImage>,
     ) {
-        let texture = ctx.load_texture(format!("thumb-{index}"), thumb, TextureOptions::LINEAR);
+        if let Some(texture) = self.thumb_textures.get_mut(&path) {
+            // Reuse the managed ID: allocating then dropping it in one frame
+            // can destroy a queued upload before egui-wgpu submits the frame.
+            texture.set(thumb, TextureOptions::LINEAR);
+        } else {
+            let texture = ctx.load_texture(format!("thumb-{index}"), thumb, TextureOptions::LINEAR);
+            self.thumb_textures.insert(path.clone(), texture);
+        }
         self.touch_lru(&path);
-        self.thumb_textures.insert(path, texture);
         self.evict_if_needed();
     }
 
@@ -294,5 +300,44 @@ impl FilmstripState {
         self.thumb_lru.clear();
         self.last_scrolled_index = None;
         self.first_reveal = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_thumbnail_results_keep_one_managed_texture() {
+        let ctx = egui::Context::default();
+        let mut state = FilmstripState::default();
+        let path = PathBuf::from("image.png");
+        let mut id = egui::TextureId::default();
+        let output = ctx.run(Default::default(), |ctx| {
+            state.insert_loaded_thumbnail(
+                ctx,
+                path.clone(),
+                0,
+                Arc::new(egui::ColorImage::new([2, 2], Color32::WHITE)),
+            );
+            id = state.thumb_textures[&path].id();
+            state.insert_loaded_thumbnail(
+                ctx,
+                path.clone(),
+                0,
+                Arc::new(egui::ColorImage::new([3, 3], Color32::GRAY)),
+            );
+            assert_eq!(state.thumb_textures[&path].id(), id);
+        });
+        assert!(output.textures_delta.free.is_empty());
+        assert_eq!(
+            output
+                .textures_delta
+                .set
+                .iter()
+                .filter(|(texture, _)| *texture == id)
+                .count(),
+            1
+        );
     }
 }

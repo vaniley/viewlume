@@ -205,7 +205,7 @@ impl CanvasState {
             .texture
             .as_ref()
             .is_none_or(|texture| texture.size() != pixels.size);
-        if needs_new_texture || size_changed {
+        if needs_new_texture || self.texture.is_none() {
             self.texture_sequence += 1;
             self.texture = Some(ctx.load_texture(
                 format!("active-image-{}", self.texture_sequence),
@@ -213,7 +213,14 @@ impl CanvasState {
                 options,
             ));
         } else if let Some(texture) = self.texture.as_mut() {
-            texture.set_partial([0, 0], pixels.clone(), options);
+            if size_changed {
+                // Keep the managed ID alive when a preview is replaced by its full image in the
+                // same egui frame. Egui-wgpu destroys freed managed textures before submitting
+                // their queued uploads, so replacing this handle here can destroy its upload.
+                texture.set(pixels.clone(), options);
+            } else {
+                texture.set_partial([0, 0], pixels.clone(), options);
+            }
         }
         self.texture_options = Some(options);
         self.displayed_pixels = Some(pixels);
@@ -441,16 +448,18 @@ pub fn render_canvas(
         ui.ctx().request_repaint();
     }
 
-    if let Some(outgoing) = state.outgoing.as_ref() {
-        let t = state.transition_progress;
-        let eased = 1.0 - (1.0 - t).powi(3);
-        let offset = Vec2::new(-state.transition_direction * 28.0 * eased, 0.0);
-        painter.image(
-            outgoing.texture.id(),
-            outgoing.rect.translate(offset),
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::from_white_alpha(((1.0 - eased) * 255.0) as u8),
-        );
+    if current_image.is_some() {
+        if let Some(outgoing) = state.outgoing.as_ref() {
+            let t = state.transition_progress;
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let offset = Vec2::new(-state.transition_direction * 28.0 * eased, 0.0);
+            painter.image(
+                outgoing.texture.id(),
+                outgoing.rect.translate(offset),
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::from_white_alpha(((1.0 - eased) * 255.0) as u8),
+            );
+        }
     }
 
     if let Some(image) = current_image {
@@ -744,6 +753,89 @@ mod tests {
             egui::ImageData::Color(pixels) => assert_eq!(pixels.pixels[0], Color32::BLUE),
             egui::ImageData::Font(_) => panic!("active image must remain a color texture"),
         }
+    }
+
+    #[test]
+    fn preview_to_full_size_change_keeps_its_managed_texture_alive() {
+        let ctx = egui::Context::default();
+        let preview = Arc::new(decoded_with_pixels(64, 64, 2, 2, Color32::WHITE));
+        let full = Arc::new(decoded(64, 64));
+        let mut state = CanvasState::default();
+        let output = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &preview, FilterMode::Auto, true, false)
+                .expect("preview upload");
+            let preview_texture = state.texture.as_ref().expect("preview texture").id();
+            state
+                .update_texture(ctx, &full, FilterMode::Auto, false, false)
+                .expect("full image upload");
+            assert_eq!(
+                state.texture.as_ref().expect("full texture").id(),
+                preview_texture,
+                "a same-frame full image must retain the preview managed texture"
+            );
+        });
+
+        let texture_id = state.texture.as_ref().expect("active texture").id();
+        assert!(
+            output
+                .textures_delta
+                .set
+                .iter()
+                .any(|(id, _)| *id == texture_id),
+            "the final full-image delta must be present"
+        );
+        assert!(
+            !output.textures_delta.free.contains(&texture_id),
+            "a managed texture cannot be freed in the frame that uploads it"
+        );
+    }
+
+    #[test]
+    fn outgoing_texture_is_not_painted_without_a_current_image() {
+        let ctx = egui::Context::default();
+        let first = Arc::new(decoded(2, 2));
+        let second = Arc::new(decoded(2, 2));
+        let mut state = CanvasState::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let _ = ctx.run(input(2048), |ctx| {
+            state
+                .update_texture(ctx, &first, FilterMode::Auto, true, false)
+                .expect("initial upload");
+            state.reset_view_actual_size(2.0, 2.0, viewport);
+            state
+                .update_texture(ctx, &second, FilterMode::Auto, true, true)
+                .expect("transition upload");
+        });
+        let outgoing_id = state
+            .outgoing
+            .as_ref()
+            .expect("outgoing texture")
+            .texture
+            .id();
+
+        let output = ctx.run(input(2048), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_canvas(
+                    ui,
+                    &mut state,
+                    None,
+                    &RenderingConfig::default(),
+                    false,
+                    CanvasInput {
+                        enabled: true,
+                        wheel_zoom: true,
+                    },
+                    None,
+                );
+            });
+        });
+        assert!(output.shapes.iter().all(|clipped| {
+            !matches!(
+                &clipped.shape,
+                egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == outgoing_id
+            )
+        }));
     }
 
     #[test]
