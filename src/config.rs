@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
@@ -24,7 +25,7 @@ impl Language {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralConfig {
     pub language: Language,
@@ -78,7 +79,7 @@ pub enum FilmstripVisibility {
     Hidden,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowConfig {
     pub mode: WindowMode,
@@ -106,7 +107,7 @@ impl Default for WindowConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RenderingConfig {
     pub filter_mode: FilterMode,
@@ -136,7 +137,7 @@ impl Default for RenderingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NavigationConfig {
     pub loop_folder: bool,
@@ -156,7 +157,7 @@ impl Default for NavigationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FilmstripConfig {
     pub visibility: FilmstripVisibility,
@@ -178,7 +179,7 @@ impl Default for FilmstripConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CacheConfig {
     pub max_ram_cache_mb: usize,
@@ -196,7 +197,7 @@ impl Default for CacheConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewerConfig {
     pub general: GeneralConfig,
@@ -256,15 +257,26 @@ impl ViewerConfig {
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
+        self.save_to(&Self::config_path())
+    }
+
+    fn save_to(&self, path: &Path) -> Result<(), String> {
         let toml_str = toml::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
-        fs::write(&path, toml_str)
-            .map_err(|e| format!("Failed to write config to {:?}: {}", path, e))?;
-        Ok(())
+        let parent = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let write = || -> std::io::Result<()> {
+            fs::create_dir_all(parent)?;
+            // Replace the old file only after the complete new config is on disk.
+            let mut file = tempfile::NamedTempFile::new_in(parent)?;
+            file.write_all(toml_str.as_bytes())?;
+            file.as_file().sync_all()?;
+            file.persist(path)?;
+            Ok(())
+        };
+        write().map_err(|e| format!("Failed to write config to {:?}: {}", path, e))
     }
 }
 
@@ -281,5 +293,19 @@ mod tests {
     fn old_configs_receive_the_english_default() {
         let config: ViewerConfig = toml::from_str("").expect("deserialize legacy config");
         assert_eq!(config.general.language, Language::English);
+    }
+
+    #[test]
+    fn save_replaces_an_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = ViewerConfig::default();
+        config.save_to(&path).unwrap();
+        config.general.language = Language::Russian;
+        config.save_to(&path).unwrap();
+
+        let saved = fs::read_to_string(path).unwrap();
+        assert_eq!(toml::from_str::<ViewerConfig>(&saved).unwrap(), config);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

@@ -1,1165 +1,487 @@
 use crate::config::{
     DoubleClickAction, FilmstripVisibility, FilterMode, Language, ViewerConfig, WindowMode,
 };
-use egui::{Context, Id, ScrollArea, Vec2, Window};
+use egui::{Color32, ComboBox, Context, Id, Order, ScrollArea, Slider, Ui, Window};
 
-const SETTINGS_DIALOG_ID: &str = "viewlume.settings.dialog";
-const DIALOG_SAFETY_INSET: f32 = 8.0;
-const NORMAL_OUTER_DIALOG_SIZE: Vec2 = Vec2::new(560.0, 400.0);
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SettingsChanges {
-    pub any: bool,
-    pub filter: bool,
-    pub cache: bool,
-    pub window_mode: bool,
-}
-
-impl SettingsChanges {
-    fn changed(&mut self) {
-        self.any = true;
-    }
-
-    fn filter_changed(&mut self) {
-        self.changed();
-        self.filter = true;
-    }
-
-    fn cache_changed(&mut self) {
-        self.changed();
-        self.cache = true;
-    }
-
-    fn window_mode_changed(&mut self) {
-        self.changed();
-        self.window_mode = true;
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SettingsAction {
-    #[default]
-    None,
-    Close,
-    Save,
-    Reset,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SettingsOutcome {
-    pub changes: SettingsChanges,
-    pub action: SettingsAction,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum SettingsCategory {
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+enum Tab {
     #[default]
     General,
-    Rendering,
+    Image,
     Navigation,
-    Filmstrip,
-    Cache,
+    Advanced,
 }
 
-impl SettingsCategory {
-    const ALL: [Self; 5] = [
-        Self::General,
-        Self::Rendering,
-        Self::Navigation,
-        Self::Filmstrip,
-        Self::Cache,
-    ];
-
-    fn id(self) -> &'static str {
-        match self {
-            Self::General => "general",
-            Self::Rendering => "rendering",
-            Self::Navigation => "navigation",
-            Self::Filmstrip => "filmstrip",
-            Self::Cache => "cache",
-        }
-    }
-
-    fn label(self, ru: bool) -> &'static str {
-        match (self, ru) {
-            (Self::General, false) => "General",
-            (Self::General, true) => "Основное",
-            (Self::Rendering, false) => "Rendering",
-            (Self::Rendering, true) => "Отображение",
-            (Self::Navigation, false) => "Navigation",
-            (Self::Navigation, true) => "Навигация",
-            (Self::Filmstrip, false) => "Filmstrip",
-            (Self::Filmstrip, true) => "Карусель",
-            (Self::Cache, false) => "Cache",
-            (Self::Cache, true) => "Кеш",
-        }
-    }
-
-    fn control_id(self, field: &'static str) -> Id {
-        Id::new(("viewlume.settings.control", self.id(), field))
-    }
-}
+type Translate = dyn Fn(&'static str, &'static str) -> &'static str;
 
 #[derive(Default)]
 pub struct SettingsDialog {
-    pub is_open: bool,
-    category: SettingsCategory,
-    reset_pending: bool,
-    reset_focus_requested: bool,
-    text_edit_focused_last_frame: bool,
-    save_error: Option<SaveError>,
+    draft: Option<ViewerConfig>,
+    tab: Tab,
+    confirm_reset: bool,
+    save_error: Option<String>,
+    editing_number: bool,
 }
 
-#[derive(Clone)]
-struct SaveError {
-    after_reset: bool,
-    detail: String,
-}
-
-impl SaveError {
-    fn new(after_reset: bool, detail: String) -> Self {
-        const MAX_DETAIL_CHARS: usize = 160;
-        let mut bounded = detail.chars().take(MAX_DETAIL_CHARS).collect::<String>();
-        if detail.chars().count() > MAX_DETAIL_CHARS {
-            bounded.push('…');
-        }
-        Self {
-            after_reset,
-            detail: bounded,
-        }
-    }
+#[derive(PartialEq, Eq)]
+enum Action {
+    None,
+    Cancel,
+    Save,
 }
 
 impl SettingsDialog {
-    pub fn show(
-        &mut self,
-        ctx: &Context,
-        config: &mut ViewerConfig,
-        opaque_window: bool,
-    ) -> SettingsOutcome {
-        if !self.is_open {
-            self.text_edit_focused_last_frame = false;
-            return SettingsOutcome::default();
+    pub fn is_open(&self) -> bool {
+        self.draft.is_some()
+    }
+
+    pub fn open(&mut self, config: &ViewerConfig) {
+        if !self.is_open() {
+            self.draft = Some(config.clone());
+            self.confirm_reset = false;
+            self.save_error = None;
+            self.editing_number = false;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel(&mut self) {
+        self.draft = None;
+    }
+
+    /// Return true only when the saved draft replaces the active settings.
+    pub fn show(&mut self, ctx: &Context, config: &mut ViewerConfig, opaque_window: bool) -> bool {
+        let Some(draft) = self.draft.as_mut() else {
+            return false;
+        };
+        if *draft == *config {
+            self.save_error = None;
+        }
+        let ru = config.general.language.is_russian();
+        let tr = move |english, russian| if ru { russian } else { english };
+        let screen = ctx.screen_rect();
+        let width = (screen.width() - 48.0).clamp(200.0, 464.0);
+        let body_height = (screen.height() - 160.0).clamp(80.0, 285.0);
+        let mut action = Action::None;
+        let mut open = true;
+        // Egui clears the focused text field before this pass on Escape. Let
+        // that first press end the edit (or close a combo box), not the dialog.
+        if !self.editing_number
+            && ctx.dragged_id().is_none()
+            && !ctx.memory(|mem| mem.any_popup_open())
+            && ctx.input(|input| {
+                input.events.iter().any(|event| {
+                    matches!(event, egui::Event::Key { key: egui::Key::Escape, pressed: true, repeat: false, modifiers, .. }
+                        if modifiers.is_none())
+                })
+            })
+        {
+            if self.confirm_reset {
+                self.confirm_reset = false;
+            } else {
+                action = Action::Cancel;
+            }
         }
 
-        let mut outcome = SettingsOutcome::default();
-        let mut open = self.is_open;
-        let mut should_close = false;
-        let available = ctx.screen_rect().shrink(DIALOG_SAFETY_INSET);
-        let window_chrome = egui::Frame::window(&ctx.style()).inner_margin.sum();
-        let compact = available.height() < NORMAL_OUTER_DIALOG_SIZE.y;
-        // `Window` adds the frame margins and title bar after its content-size
-        // constraint. Reserve three additional vertical frame margins so the
-        // resulting outer rect still fits the logical inset on compact screens.
-        let max_size = (available.size() - Vec2::new(window_chrome.x, window_chrome.y * 4.0))
-            .max(Vec2::splat(1.0));
-        let ru = config.general.language.is_russian();
-        let tr = |english: &'static str, russian: &'static str| if ru { russian } else { english };
+        let backdrop = egui::Area::new(Id::new("settings-backdrop"))
+            .order(Order::Middle)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_black_alpha(128));
+            });
+        ctx.move_to_top(backdrop.response.layer_id);
 
-        self.handle_escape(ctx, &mut open, &mut outcome);
-
-        let window = Window::new(tr("Settings", "Настройки"))
-            .id(Id::new(SETTINGS_DIALOG_ID))
+        Window::new(tr("Settings", "Настройки"))
+            .id(Id::new("viewer-settings"))
+            .order(Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .open(&mut open)
             .collapsible(false)
-            .resizable(true)
-            .default_size((NORMAL_OUTER_DIALOG_SIZE - window_chrome).min(max_size))
-            .min_size(Vec2::ZERO)
-            .max_size(max_size)
-            .constrain_to(available);
-        let window = if compact {
-            window.fixed_size(max_size)
-        } else {
-            window
-        };
-        window.show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 10.0);
+            .auto_sized()
+            .show(ctx, |ui| {
+                ui.set_width(width);
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.add_enabled_ui(!self.confirm_reset, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for (tab, label) in [
+                            (Tab::General, tr("General", "Общие")),
+                            (Tab::Image, tr("Image", "Изображение")),
+                            (Tab::Navigation, tr("Navigation", "Навигация")),
+                            (Tab::Advanced, tr("Advanced", "Дополнительно")),
+                        ] {
+                            ui.selectable_value(&mut self.tab, tab, label);
+                        }
+                    });
+                });
+                ui.separator();
 
-            ui.add_enabled_ui(!self.reset_pending, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for category in SettingsCategory::ALL {
-                        ui.push_id(category.control_id("tab"), |ui| {
-                            ui.selectable_value(&mut self.category, category, category.label(ru));
+                ScrollArea::vertical()
+                    .id_salt((self.tab, self.confirm_reset, self.save_error.is_some()))
+                    .max_height(body_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.confirm_reset {
+                            ui.heading(tr("Restore defaults?", "Восстановить настройки?"));
+                            ui.label(tr(
+                                "This replaces your edits with the default settings. Nothing changes until you save.",
+                                "Текущие правки будут заменены настройками по умолчанию. Изменения вступят в силу после сохранения.",
+                            ));
+                        } else {
+                            if let Some(error) = &self.save_error {
+                                ui.colored_label(ui.visuals().error_fg_color, tr(
+                                    "Could not save settings. Your changes are still here. Try again.",
+                                    "Не удалось сохранить настройки. Ваши изменения не потеряны. Повторите попытку.",
+                                ));
+                                ui.add(egui::Label::new(error).wrap());
+                            }
+                            match self.tab {
+                                Tab::General => general(ui, draft, &tr, opaque_window),
+                                Tab::Image => image(ui, draft, &tr),
+                                Tab::Navigation => navigation(ui, draft, &tr),
+                                Tab::Advanced => advanced(ui, draft, &tr),
+                            }
+                        }
+                    });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if self.confirm_reset {
+                        if ui.button(tr("Keep edits", "Оставить правки")).clicked() {
+                            self.confirm_reset = false;
+                        }
+                        if ui.button(tr("Restore defaults", "Восстановить настройки")).clicked() {
+                            *draft = ViewerConfig::default();
+                            self.confirm_reset = false;
+                            self.save_error = None;
+                        }
+                    } else {
+                        if ui.button(tr("Restore defaults…", "Восстановить настройки…")).clicked() {
+                            self.confirm_reset = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add_enabled(*draft != *config, egui::Button::new(tr("Save", "Сохранить"))).clicked() {
+                                action = Action::Save;
+                            }
+                            if ui.button(tr("Cancel", "Отмена")).clicked() {
+                                action = Action::Cancel;
+                            }
                         });
                     }
                 });
             });
-            ui.separator();
 
-            let reserved_footer_height =
-                self.footer_height(ui, self.reset_pending, self.save_error.is_some());
-            let body_height = (ui.available_height() - reserved_footer_height).max(0.0);
-            let (body_rect, _) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), body_height),
-                egui::Sense::hover(),
-            );
-            let mut body_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(body_rect)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            );
-            body_ui.add_enabled_ui(!self.reset_pending, |ui| {
-                ScrollArea::vertical()
-                    .id_salt(("viewlume.settings.scroll", self.category.id()))
-                    .auto_shrink([false, false])
-                    .max_height(body_height)
-                    .show(ui, |ui| {
-                        ui.push_id(self.category.control_id("content"), |ui| {
-                            self.category_content(
-                                ui,
-                                config,
-                                opaque_window,
-                                ru,
-                                &mut outcome.changes,
-                            );
-                        });
-                    });
-            });
-
-            if let Some(error) = &self.save_error {
-                ui.separator();
-                let heading = if error.after_reset {
-                    tr(
-                        "Defaults are applied, but could not be saved.",
-                        "Настройки по умолчанию применены, но сохранить их не удалось.",
-                    )
-                } else {
-                    tr("Could not save settings", "Не удалось сохранить настройки")
-                };
-                ui.colored_label(egui::Color32::from_rgb(248, 113, 113), heading);
-                ui.add_sized(
-                    Vec2::new(
-                        ui.available_width(),
-                        ui.text_style_height(&egui::TextStyle::Body)
-                            * if compact { 1.0 } else { 2.0 },
-                    ),
-                    if compact {
-                        egui::Label::new(&error.detail).truncate()
-                    } else {
-                        egui::Label::new(&error.detail).wrap()
-                    },
-                );
-            }
-
-            ui.separator();
-            if self.reset_pending {
-                self.reset_footer(ui, config, ru, &mut outcome);
-            } else {
-                self.normal_footer(ui, config, ru, &mut should_close, &mut outcome);
-            }
-        });
-
-        self.is_open = open && !should_close;
-        if !self.is_open && outcome.action == SettingsAction::None {
-            outcome.action = SettingsAction::Close;
-        }
-        if !self.is_open {
-            self.reset_pending = false;
-            self.reset_focus_requested = false;
-            self.text_edit_focused_last_frame = false;
-            self.save_error = None;
-        } else {
-            self.remember_text_edit_focus(ctx);
-        }
-        outcome
-    }
-
-    fn footer_height(&self, ui: &egui::Ui, reset_pending: bool, has_error: bool) -> f32 {
-        let line_height = ui.text_style_height(&egui::TextStyle::Body);
-        let button_height = ui.spacing().interact_size.y;
-        let error_height = if has_error {
-            line_height * 4.0 + ui.spacing().item_spacing.y
-        } else {
-            0.0
-        };
-        let footer_height = if reset_pending {
-            line_height * 3.0 + button_height + ui.spacing().item_spacing.y * 3.0
-        } else {
-            button_height + ui.spacing().item_spacing.y
-        };
-        error_height + footer_height + ui.spacing().item_spacing.y * 2.0
-    }
-
-    fn handle_escape(&mut self, ctx: &Context, open: &mut bool, outcome: &mut SettingsOutcome) {
-        let initial_escape = ctx.input(|input| {
-            input.events.iter().any(|event| {
-                matches!(
-                    event,
-                    egui::Event::Key {
-                        key: egui::Key::Escape,
-                        pressed: true,
-                        repeat: false,
-                        ..
-                    }
-                )
-            })
-        });
-        if !initial_escape {
-            return;
-        }
-
-        if ctx.memory(|memory| memory.any_popup_open()) {
-            ctx.memory_mut(|memory| memory.close_popup());
-        } else if self.reset_pending {
-            self.reset_pending = false;
-            self.reset_focus_requested = false;
-        } else if !self.text_edit_focused_last_frame {
-            *open = false;
-            outcome.action = SettingsAction::Close;
-        }
-    }
-
-    fn remember_text_edit_focus(&mut self, ctx: &Context) {
-        self.text_edit_focused_last_frame = ctx
-            .memory(|memory| memory.focused())
+        self.editing_number = ctx
+            .memory(egui::Memory::focused)
             .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+
+        if !open || action == Action::Cancel {
+            self.draft = None;
+            ctx.request_repaint();
+        } else if action == Action::Save {
+            ctx.request_repaint();
+            return self.save_draft(config, ViewerConfig::save);
+        }
+        false
     }
 
-    fn save_result(&mut self, after_reset: bool, result: Result<(), String>) -> bool {
-        match result {
+    fn save_draft(
+        &mut self,
+        config: &mut ViewerConfig,
+        save: impl FnOnce(&ViewerConfig) -> Result<(), String>,
+    ) -> bool {
+        let Some(draft) = self.draft.take() else {
+            return false;
+        };
+        match save(&draft) {
             Ok(()) => {
+                *config = draft;
                 self.save_error = None;
                 true
             }
-            Err(detail) => {
-                self.save_error = Some(SaveError::new(after_reset, detail));
+            Err(error) => {
+                self.draft = Some(draft);
+                self.save_error = Some(error);
                 false
             }
         }
     }
+}
 
-    fn reset_with_save(
-        &mut self,
-        config: &mut ViewerConfig,
-        save: impl FnOnce(&ViewerConfig) -> Result<(), String>,
-    ) {
-        *config = ViewerConfig::default();
-        self.reset_pending = false;
-        self.reset_focus_requested = false;
-        self.save_result(true, save(config));
-    }
-
-    fn reset_changes() -> SettingsChanges {
-        SettingsChanges {
-            any: true,
-            filter: true,
-            cache: true,
-            window_mode: true,
-        }
-    }
-
-    fn category_content(
-        &mut self,
-        ui: &mut egui::Ui,
-        config: &mut ViewerConfig,
-        opaque_window: bool,
-        ru: bool,
-        changes: &mut SettingsChanges,
-    ) {
-        match self.category {
-            SettingsCategory::General => {
-                self.general_content(ui, config, opaque_window, ru, changes)
+fn choice<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    id: &'static str,
+    label: &'static str,
+    value: &mut T,
+    options: &[(T, &'static str)],
+) {
+    let label = ui.label(label);
+    let selected = options.iter().find(|(option, _)| option == value);
+    ComboBox::from_id_salt(id)
+        .selected_text(selected.map_or("", |(_, text)| *text))
+        .show_ui(ui, |ui| {
+            for &(option, text) in options {
+                ui.selectable_value(value, option, text);
             }
-            SettingsCategory::Rendering => self.rendering_content(ui, config, ru, changes),
-            SettingsCategory::Navigation => self.navigation_content(ui, config, ru, changes),
-            SettingsCategory::Filmstrip => self.filmstrip_content(ui, config, ru, changes),
-            SettingsCategory::Cache => self.cache_content(ui, config, ru, changes),
-        }
+        })
+        .response
+        .labelled_by(label.id);
+}
+
+fn slider(ui: &mut Ui, label: &'static str, slider: Slider<'_>) {
+    let label = ui.label(label);
+    ui.add(slider).labelled_by(label.id);
+}
+
+fn general(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate, opaque_window: bool) {
+    ui.heading(tr("Language", "Язык"));
+    choice(
+        ui,
+        "language",
+        tr("Interface language", "Язык интерфейса"),
+        &mut config.general.language,
+        &[
+            (Language::English, "English"),
+            (Language::Russian, "Русский"),
+            (Language::Auto, tr("System", "Системный")),
+        ],
+    );
+    ui.separator();
+    ui.heading(tr("Window and controls", "Окно и управление"));
+    choice(
+        ui,
+        "startup-mode",
+        tr("Window mode at startup", "Режим окна при запуске"),
+        &mut config.window.mode,
+        &[
+            (WindowMode::Windowed, tr("Windowed", "Оконный")),
+            (
+                WindowMode::Overlay,
+                tr("Fullscreen overlay", "Полноэкранный оверлей"),
+            ),
+        ],
+    );
+    ui.label(tr(
+        "To switch modes without restarting, close Settings and press F11.",
+        "Чтобы переключить режим без перезапуска, закройте настройки и нажмите F11.",
+    ));
+    ui.checkbox(
+        &mut config.window.auto_hide_ui,
+        tr(
+            "Hide controls when idle",
+            "Скрывать элементы управления при бездействии",
+        ),
+    );
+    ui.add_enabled(
+        !opaque_window,
+        egui::Checkbox::new(
+            &mut config.window.transparent_windowed_background,
+            tr(
+                "Transparent background in windowed mode",
+                "Прозрачный фон в оконном режиме",
+            ),
+        ),
+    );
+    if opaque_window {
+        ui.label(tr(
+            "This launch uses an opaque window.",
+            "Этот запуск использует непрозрачное окно.",
+        ));
     }
+}
 
-    fn general_content(
-        &self,
-        ui: &mut egui::Ui,
-        config: &mut ViewerConfig,
-        opaque_window: bool,
-        ru: bool,
-        changes: &mut SettingsChanges,
-    ) {
-        let tr = |english, russian| if ru { russian } else { english };
-        ui.heading(tr("Language", "Язык"));
-        ui.label(tr("Interface language:", "Язык интерфейса:"));
-        ui.push_id(SettingsCategory::General.control_id("language"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (language, label) in [
-                    (Language::Auto, tr("System", "Системный")),
-                    (Language::English, "English"),
-                    (Language::Russian, "Русский"),
-                ] {
-                    if ui
-                        .selectable_value(&mut config.general.language, language, label)
-                        .changed()
-                    {
-                        changes.changed();
-                    }
-                }
-            });
-        });
-
-        ui.separator();
-        ui.heading(tr("Window & Display", "Окно и экран"));
-        ui.label(tr("Default mode:", "Режим по умолчанию:"));
-        ui.push_id(SettingsCategory::General.control_id("window_mode"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .selectable_value(
-                        &mut config.window.mode,
-                        WindowMode::Overlay,
-                        tr("Fullscreen overlay", "Полноэкранный оверлей"),
-                    )
-                    .changed()
-                {
-                    changes.window_mode_changed();
-                }
-                if ui
-                    .selectable_value(
-                        &mut config.window.mode,
-                        WindowMode::Windowed,
-                        tr("Windowed", "Оконный"),
-                    )
-                    .changed()
-                {
-                    changes.window_mode_changed();
-                }
-            });
-        });
-
-        ui.label(tr("Double-click canvas:", "Двойной клик:"));
-        egui::ComboBox::from_id_salt(SettingsCategory::General.control_id("double_click"))
-            .selected_text(match config.window.double_click_action {
-                DoubleClickAction::ToggleWindowMode => {
-                    tr("Toggle window mode", "Переключать режим окна")
-                }
-                DoubleClickAction::ToggleFitToWindow => {
-                    tr("Toggle fit to window", "Вписывать в окно")
-                }
-                DoubleClickAction::ToggleActualSize => tr("Toggle 1:1 actual size", "Масштаб 1:1"),
-                DoubleClickAction::None => tr("None", "Нет"),
-            })
-            .show_ui(ui, |ui| {
-                for (value, label) in [
-                    (
-                        DoubleClickAction::ToggleWindowMode,
-                        tr("Toggle window mode", "Переключать режим окна"),
-                    ),
-                    (
-                        DoubleClickAction::ToggleFitToWindow,
-                        tr("Toggle fit to window", "Вписывать в окно"),
-                    ),
-                    (
-                        DoubleClickAction::ToggleActualSize,
-                        tr("Toggle 1:1 actual size", "Масштаб 1:1"),
-                    ),
-                    (DoubleClickAction::None, tr("None", "Нет")),
-                ] {
-                    if ui
-                        .selectable_value(&mut config.window.double_click_action, value, label)
-                        .changed()
-                    {
-                        changes.changed();
-                    }
-                }
-            });
-
-        ui.add_enabled_ui(!opaque_window, |ui| {
-            self.checkbox(
-                ui,
-                SettingsCategory::General.control_id("transparent_background"),
-                &mut config.window.transparent_windowed_background,
-                tr(
-                    "Transparent background in windowed mode",
-                    "Прозрачный фон в оконном режиме",
-                ),
-                changes,
-            );
-        });
-        if opaque_window {
-            ui.label(tr(
-                "Transparent window backgrounds are unavailable in opaque compatibility mode.",
-                "Прозрачный фон окна недоступен в режиме совместимости с непрозрачным окном.",
-            ));
-        }
-
-        self.checkbox(
-            ui,
-            SettingsCategory::General.control_id("checkerboard"),
-            &mut config.window.show_checkerboard_for_transparent,
-            tr(
-                "Show checkerboard for transparency",
-                "Шахматный фон для прозрачности",
+fn image(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
+    ui.heading(tr("Image display", "Отображение изображения"));
+    choice(
+        ui,
+        "texture-filter",
+        tr("Texture filtering", "Фильтрация изображения"),
+        &mut config.rendering.filter_mode,
+        &[
+            (FilterMode::Auto, tr("Automatic", "Автоматически")),
+            (
+                FilterMode::Nearest,
+                tr("Nearest (sharp pixels)", "Без сглаживания"),
             ),
-            changes,
-        );
-        self.checkbox(
-            ui,
-            SettingsCategory::General.control_id("auto_hide"),
-            &mut config.window.auto_hide_ui,
-            tr(
-                "Auto-hide controls when idle",
-                "Скрывать элементы управления при бездействии",
+            (FilterMode::Bilinear, tr("Bilinear (smooth)", "Билинейная")),
+        ],
+    );
+    ui.checkbox(
+        &mut config.window.show_checkerboard_for_transparent,
+        tr(
+            "Show checkerboard behind transparent images",
+            "Показывать шахматный фон за прозрачными изображениями",
+        ),
+    );
+    ui.separator();
+    ui.heading(tr("Zoom and pan", "Масштаб и перемещение"));
+    choice(
+        ui,
+        "double-click",
+        tr("Double-click action", "Действие двойного щелчка"),
+        &mut config.window.double_click_action,
+        &[
+            (
+                DoubleClickAction::ToggleWindowMode,
+                tr("Switch fullscreen and windowed", "Переключить режим окна"),
             ),
-            changes,
-        );
-    }
-
-    fn rendering_content(
-        &self,
-        ui: &mut egui::Ui,
-        config: &mut ViewerConfig,
-        ru: bool,
-        changes: &mut SettingsChanges,
-    ) {
-        let tr = |english, russian| if ru { russian } else { english };
-        ui.heading(tr("Rendering & Zoom", "Отображение и масштаб"));
-        ui.label(tr("Texture filtering:", "Фильтрация:"));
-        ui.push_id(SettingsCategory::Rendering.control_id("filter"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (mode, english, russian) in [
-                    (FilterMode::Auto, "Auto", "Авто"),
-                    (
-                        FilterMode::Nearest,
-                        "Nearest (pixel art)",
-                        "Без сглаживания",
-                    ),
-                    (FilterMode::Bilinear, "Bilinear (smooth)", "Билинейная"),
-                ] {
-                    if ui
-                        .selectable_value(
-                            &mut config.rendering.filter_mode,
-                            mode,
-                            tr(english, russian),
-                        )
-                        .changed()
-                    {
-                        changes.filter_changed();
-                    }
-                }
-            });
-        });
-
-        self.slider_row(
-            ui,
-            SettingsCategory::Rendering.control_id("zoom_factor"),
-            tr("Zoom speed:", "Скорость масштаба:"),
-            |ui| {
-                ui.add(
-                    egui::Slider::new(&mut config.rendering.zoom_factor, 1.05..=1.50).step_by(0.01),
-                )
-                .changed()
-            },
-            changes,
-        );
-        self.checkbox(
-            ui,
-            SettingsCategory::Rendering.control_id("zoom_towards_cursor"),
-            &mut config.rendering.zoom_towards_cursor,
-            tr("Zoom toward pointer", "Масштабировать к курсору"),
-            changes,
-        );
-        self.checkbox(
-            ui,
-            SettingsCategory::Rendering.control_id("reverse_zoom"),
-            &mut config.rendering.reverse_zoom_direction,
-            tr("Invert mouse-wheel zoom", "Инвертировать колесо мыши"),
-            changes,
-        );
-        self.checkbox(
-            ui,
-            SettingsCategory::Rendering.control_id("smooth_pan"),
-            &mut config.rendering.smooth_pan,
-            tr("Short panning inertia", "Короткая инерция перемещения"),
-            changes,
-        );
-        self.checkbox(
-            ui,
-            SettingsCategory::Rendering.control_id("animate_transitions"),
-            &mut config.rendering.animate_image_transitions,
-            tr(
-                "Animate image changes",
-                "Анимация перелистывания изображений",
+            (
+                DoubleClickAction::ToggleFitToWindow,
+                tr("Fit to window", "Вписать в окно"),
             ),
-            changes,
-        );
-        ui.add_enabled_ui(config.rendering.animate_image_transitions, |ui| {
-            self.slider_row(
-                ui,
-                SettingsCategory::Rendering.control_id("transition_duration"),
-                tr("Transition duration:", "Длительность перехода:"),
-                |ui| {
-                    ui.add(
-                        egui::Slider::new(&mut config.rendering.image_transition_ms, 80.0..=500.0)
-                            .suffix(tr(" ms", " мс")),
-                    )
-                    .changed()
-                },
-                changes,
-            );
-        });
-    }
-
-    fn navigation_content(
-        &self,
-        ui: &mut egui::Ui,
-        config: &mut ViewerConfig,
-        ru: bool,
-        changes: &mut SettingsChanges,
-    ) {
-        let tr = |english, russian| if ru { russian } else { english };
-        ui.heading(tr("Navigation & Controls", "Навигация и управление"));
-        self.checkbox(
-            ui,
-            SettingsCategory::Navigation.control_id("loop_folder"),
-            &mut config.navigation.loop_folder,
-            tr("Loop folder navigation", "Циклическая навигация по папке"),
-            changes,
-        );
-        self.checkbox(
-            ui,
-            SettingsCategory::Navigation.control_id("edge_buttons"),
-            &mut config.navigation.edge_buttons_enabled,
-            tr(
-                "Show edge navigation buttons",
-                "Показывать кнопки навигации по краям",
+            (
+                DoubleClickAction::ToggleActualSize,
+                tr("Show actual size (100%)", "Показать исходный размер (100%)"),
             ),
-            changes,
-        );
-        self.checkbox(
+            (
+                DoubleClickAction::None,
+                tr("Do nothing", "Ничего не делать"),
+            ),
+        ],
+    );
+    slider(
+        ui,
+        tr("Zoom speed", "Скорость масштабирования"),
+        Slider::new(&mut config.rendering.zoom_factor, 1.05..=1.50).step_by(0.01),
+    );
+    ui.checkbox(
+        &mut config.rendering.zoom_towards_cursor,
+        tr("Zoom toward pointer", "Масштабировать к курсору"),
+    );
+    ui.checkbox(
+        &mut config.rendering.reverse_zoom_direction,
+        tr(
+            "Reverse wheel zoom",
+            "Инвертировать масштабирование колёсиком",
+        ),
+    );
+    ui.checkbox(
+        &mut config.rendering.smooth_pan,
+        tr(
+            "Continue panning briefly after release",
+            "Короткая инерция перемещения",
+        ),
+    );
+    ui.separator();
+    ui.heading(tr("Transitions", "Переходы"));
+    ui.checkbox(
+        &mut config.rendering.animate_image_transitions,
+        tr("Animate image changes", "Анимировать смену изображений"),
+    );
+    ui.add_enabled_ui(config.rendering.animate_image_transitions, |ui| {
+        slider(
             ui,
-            SettingsCategory::Navigation.control_id("animate_buttons"),
+            tr("Transition duration", "Длительность перехода"),
+            Slider::new(&mut config.rendering.image_transition_ms, 80.0..=500.0)
+                .suffix(tr(" ms", " мс")),
+        );
+    });
+}
+
+fn navigation(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
+    ui.heading(tr("Folder navigation", "Навигация по папке"));
+    ui.checkbox(
+        &mut config.navigation.loop_folder,
+        tr(
+            "Wrap from last image to first",
+            "Переходить между первым и последним изображениями",
+        ),
+    );
+    ui.checkbox(
+        &mut config.navigation.edge_buttons_enabled,
+        tr("Show arrows at the edges", "Показывать стрелки по краям"),
+    );
+    ui.add_enabled(
+        config.navigation.edge_buttons_enabled,
+        egui::Checkbox::new(
             &mut config.navigation.animate_buttons,
-            tr(
-                "Animate navigation buttons",
-                "Анимация кнопок перелистывания",
-            ),
-            changes,
-        );
-    }
+            tr("Animate navigation arrows", "Анимировать стрелки навигации"),
+        ),
+    );
+    ui.separator();
+    ui.heading(tr("Filmstrip", "Карусель"));
+    choice(
+        ui,
+        "filmstrip-visibility",
+        tr("Show the filmstrip", "Показывать карусель"),
+        &mut config.filmstrip.visibility,
+        &[
+            (FilmstripVisibility::Hover, tr("On hover", "При наведении")),
+            (FilmstripVisibility::Always, tr("Always", "Всегда")),
+            (FilmstripVisibility::Hidden, tr("Never", "Никогда")),
+        ],
+    );
+    ui.add_enabled_ui(
+        config.filmstrip.visibility != FilmstripVisibility::Hidden,
+        |ui| {
+            slider(
+                ui,
+                tr("Thumbnail size", "Размер миниатюр"),
+                Slider::new(&mut config.filmstrip.thumbnail_size, 48..=128)
+                    .suffix(tr(" px", " пкс")),
+            );
+            ui.checkbox(
+                &mut config.filmstrip.auto_scroll_to_active,
+                tr(
+                    "Scroll to the current image",
+                    "Прокручивать к текущему изображению",
+                ),
+            );
+            ui.checkbox(
+                &mut config.filmstrip.coverflow_effect,
+                tr(
+                    "Enlarge thumbnails near the center",
+                    "Увеличивать миниатюры ближе к центру",
+                ),
+            );
+        },
+    );
+}
 
-    fn filmstrip_content(
-        &self,
-        ui: &mut egui::Ui,
-        config: &mut ViewerConfig,
-        ru: bool,
-        changes: &mut SettingsChanges,
-    ) {
-        let tr = |english, russian| if ru { russian } else { english };
-        ui.heading(tr("Filmstrip", "Карусель"));
-        ui.label(tr("Visibility:", "Видимость:"));
-        ui.push_id(SettingsCategory::Filmstrip.control_id("visibility"), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (value, english, russian) in [
-                    (FilmstripVisibility::Hover, "On hover", "При наведении"),
-                    (FilmstripVisibility::Always, "Always", "Всегда"),
-                    (FilmstripVisibility::Hidden, "Hidden", "Скрыта"),
-                ] {
-                    if ui
-                        .selectable_value(
-                            &mut config.filmstrip.visibility,
-                            value,
-                            tr(english, russian),
-                        )
-                        .changed()
-                    {
-                        changes.changed();
-                    }
-                }
-            });
-        });
-        self.slider_row(
-            ui,
-            SettingsCategory::Filmstrip.control_id("thumbnail_size"),
-            tr("Thumbnail size (px):", "Размер миниатюр (пкс):"),
-            |ui| {
-                ui.add(egui::Slider::new(
-                    &mut config.filmstrip.thumbnail_size,
-                    48..=128,
-                ))
-                .changed()
-            },
-            changes,
-        );
-        self.checkbox(
-            ui,
-            SettingsCategory::Filmstrip.control_id("scroll_active"),
-            &mut config.filmstrip.auto_scroll_to_active,
-            tr(
-                "Scroll to active image",
-                "Прокручивать к активному изображению",
-            ),
-            changes,
-        );
-        self.checkbox(
-            ui,
-            SettingsCategory::Filmstrip.control_id("coverflow"),
-            &mut config.filmstrip.coverflow_effect,
-            tr(
-                "Enlarge thumbnails near center",
-                "Увеличивать превью ближе к центру",
-            ),
-            changes,
-        );
-    }
-
-    fn cache_content(
-        &self,
-        ui: &mut egui::Ui,
-        config: &mut ViewerConfig,
-        ru: bool,
-        changes: &mut SettingsChanges,
-    ) {
-        let tr = |english, russian| if ru { russian } else { english };
-        ui.heading(tr("Cache & Preloading", "Кеш и предзагрузка"));
-        ui.label(tr(
-            "Decoded-image cache capacity (MB); active images, decoding, animation frames, and GPU textures are separate.",
-            "Ёмкость кеша декодированных изображений (МБ); активные изображения, декодирование, кадры анимации и текстуры GPU учитываются отдельно.",
-        ));
-        let mut cache_changed = false;
-        self.slider_row(
-            ui,
-            SettingsCategory::Cache.control_id("capacity"),
-            tr("Cache capacity (MB):", "Ёмкость кеша (МБ):"),
-            |ui| {
-                let changed = ui
-                    .add(
-                        egui::Slider::new(&mut config.cache.max_ram_cache_mb, 256..=4096)
-                            .step_by(128.0),
-                    )
-                    .changed();
-                cache_changed |= changed;
-                changed
-            },
-            changes,
-        );
-        if cache_changed {
-            changes.cache_changed();
-        }
-        self.slider_row(
-            ui,
-            SettingsCategory::Cache.control_id("prefetch"),
-            tr("Prefetch adjacent images:", "Предзагружать соседние:"),
-            |ui| {
-                ui.add(egui::Slider::new(&mut config.cache.prefetch_count, 0..=6))
-                    .changed()
-            },
-            changes,
-        );
-    }
-
-    fn checkbox(
-        &self,
-        ui: &mut egui::Ui,
-        id: Id,
-        value: &mut bool,
-        label: &str,
-        changes: &mut SettingsChanges,
-    ) {
-        ui.push_id(id, |ui| {
-            if ui.checkbox(value, label).changed() {
-                changes.changed();
-            }
-        });
-    }
-
-    fn slider_row(
-        &self,
-        ui: &mut egui::Ui,
-        id: Id,
-        label: &str,
-        add_slider: impl FnOnce(&mut egui::Ui) -> bool,
-        changes: &mut SettingsChanges,
-    ) {
-        ui.push_id(id, |ui| {
-            let narrow = ui.available_width() < 300.0;
-            if narrow {
-                ui.label(label);
-                if add_slider(ui) {
-                    changes.changed();
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(label);
-                    if add_slider(ui) {
-                        changes.changed();
-                    }
-                });
-            }
-        });
-    }
-
-    fn normal_footer(
-        &mut self,
-        ui: &mut egui::Ui,
-        config: &mut ViewerConfig,
-        ru: bool,
-        should_close: &mut bool,
-        outcome: &mut SettingsOutcome,
-    ) {
-        let tr = |english, russian| if ru { russian } else { english };
-        ui.horizontal_wrapped(|ui| {
-            if ui.button(tr("Reset", "Сбросить")).clicked() {
-                self.reset_pending = true;
-                self.reset_focus_requested = true;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(tr("Close", "Закрыть")).clicked() {
-                    *should_close = true;
-                    outcome.action = SettingsAction::Close;
-                }
-                let retrying_reset_save = self
-                    .save_error
-                    .as_ref()
-                    .is_some_and(|error| error.after_reset);
-                if ui.button(tr("Save", "Сохранить")).clicked()
-                    && self.save_result(retrying_reset_save, config.save())
-                {
-                    *should_close = true;
-                    outcome.action = SettingsAction::Save;
-                }
-            });
-        });
-    }
-
-    fn reset_footer(
-        &mut self,
-        ui: &mut egui::Ui,
-        config: &mut ViewerConfig,
-        ru: bool,
-        outcome: &mut SettingsOutcome,
-    ) {
-        let tr = |english, russian| if ru { russian } else { english };
-        ui.label(
-            egui::RichText::new(tr("Reset all settings?", "Сбросить все настройки?")).strong(),
-        );
-        ui.label(tr(
-            "This resets every category to its defaults and saves the changes.",
-            "Все категории будут сброшены к значениям по умолчанию, а изменения — сохранены.",
-        ));
-        ui.horizontal(|ui| {
-            let cancel = ui.button(tr("Cancel", "Отмена"));
-            if self.reset_focus_requested {
-                cancel.request_focus();
-                self.reset_focus_requested = false;
-            }
-            if cancel.clicked() {
-                self.reset_pending = false;
-                self.reset_focus_requested = false;
-            }
-            if ui.button(tr("Reset", "Сбросить")).clicked() {
-                self.reset_with_save(config, ViewerConfig::save);
-                outcome.changes = Self::reset_changes();
-                outcome.action = SettingsAction::Reset;
-            }
-        });
-    }
+fn advanced(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
+    ui.heading(tr("Cache and preloading", "Кеш и предзагрузка"));
+    slider(
+        ui,
+        tr("Image cache limit", "Лимит кеша изображений"),
+        Slider::new(&mut config.cache.max_ram_cache_mb, 256..=4096)
+            .step_by(128.0)
+            .suffix(tr(" MB", " МБ")),
+    );
+    ui.add_space(ui.spacing().item_spacing.y);
+    slider(
+        ui,
+        tr(
+            "Nearby images to preload",
+            "Число соседних изображений для предзагрузки",
+        ),
+        Slider::new(&mut config.cache.prefetch_count, 0..=6),
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
-
-    fn render_dialog(
-        ctx: &Context,
-        dialog: &mut SettingsDialog,
-        config: &mut ViewerConfig,
-        screen: egui::Rect,
-    ) {
-        let _ = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(screen),
-                ..Default::default()
-            },
-            |ctx| {
-                assert_eq!(dialog.show(ctx, config, false).action, SettingsAction::None);
-            },
-        );
-    }
-
-    fn assert_dialog_in_bounds(ctx: &Context, bounds: egui::Rect) {
-        let rect = ctx
-            .memory(|memory| memory.area_rect(Id::new(SETTINGS_DIALOG_ID)))
-            .expect("settings window rect");
-        assert!(
-            bounds.contains_rect(rect),
-            "settings rect outside bounds: {rect:?}"
-        );
-    }
 
     #[test]
-    fn categories_have_stable_nonlocalized_ids() {
-        assert_eq!(SettingsCategory::General.id(), "general");
-        assert_eq!(SettingsCategory::Rendering.id(), "rendering");
-        assert_eq!(SettingsCategory::Navigation.id(), "navigation");
-        assert_eq!(SettingsCategory::Filmstrip.id(), "filmstrip");
-        assert_eq!(SettingsCategory::Cache.id(), "cache");
-
-        let control_ids = [
-            SettingsCategory::General.control_id("language"),
-            SettingsCategory::General.control_id("window_mode"),
-            SettingsCategory::General.control_id("double_click"),
-            SettingsCategory::General.control_id("transparent_background"),
-            SettingsCategory::General.control_id("checkerboard"),
-            SettingsCategory::General.control_id("auto_hide"),
-            SettingsCategory::Rendering.control_id("filter"),
-            SettingsCategory::Rendering.control_id("zoom_factor"),
-            SettingsCategory::Rendering.control_id("zoom_towards_cursor"),
-            SettingsCategory::Rendering.control_id("reverse_zoom"),
-            SettingsCategory::Rendering.control_id("smooth_pan"),
-            SettingsCategory::Rendering.control_id("animate_transitions"),
-            SettingsCategory::Rendering.control_id("transition_duration"),
-            SettingsCategory::Navigation.control_id("loop_folder"),
-            SettingsCategory::Navigation.control_id("edge_buttons"),
-            SettingsCategory::Navigation.control_id("animate_buttons"),
-            SettingsCategory::Filmstrip.control_id("visibility"),
-            SettingsCategory::Filmstrip.control_id("thumbnail_size"),
-            SettingsCategory::Filmstrip.control_id("scroll_active"),
-            SettingsCategory::Filmstrip.control_id("coverflow"),
-            SettingsCategory::Cache.control_id("capacity"),
-            SettingsCategory::Cache.control_id("prefetch"),
-        ];
-        assert_eq!(
-            control_ids.len(),
-            control_ids.iter().collect::<HashSet<_>>().len()
-        );
-    }
-
-    #[test]
-    fn outcome_marks_only_affected_runtime_settings() {
-        let mut changes = SettingsChanges::default();
-        changes.changed();
-        assert_eq!(
-            changes,
-            SettingsChanges {
-                any: true,
-                ..Default::default()
-            }
-        );
-
-        changes.filter_changed();
-        assert!(changes.filter);
-        assert!(!changes.cache);
-
-        changes.cache_changed();
-        assert!(changes.cache);
-
-        let mut window_mode = SettingsChanges::default();
-        window_mode.window_mode_changed();
-        assert_eq!(
-            window_mode,
-            SettingsChanges {
-                any: true,
-                window_mode: true,
-                ..Default::default()
-            }
-        );
-
-        assert_eq!(
-            SettingsDialog::reset_changes(),
-            SettingsChanges {
-                any: true,
-                filter: true,
-                cache: true,
-                window_mode: true,
-            }
-        );
-    }
-
-    #[test]
-    fn escape_prioritizes_popup_reset_text_edit_then_dialog_close() {
-        let escape = egui::Event::Key {
-            key: egui::Key::Escape,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        };
-
-        let mut popup_dialog = SettingsDialog {
-            reset_pending: true,
-            ..Default::default()
-        };
-        let popup_ctx = Context::default();
-        let _ = popup_ctx.run(
-            egui::RawInput {
-                events: vec![escape.clone()],
-                ..Default::default()
-            },
-            |ctx| {
-                ctx.memory_mut(|memory| memory.open_popup(Id::new("test.popup")));
-                let mut open = true;
-                let mut outcome = SettingsOutcome::default();
-                popup_dialog.handle_escape(ctx, &mut open, &mut outcome);
-                assert!(open);
-                assert!(popup_dialog.reset_pending);
-                assert!(!ctx.memory(|memory| memory.any_popup_open()));
-                assert_eq!(outcome.action, SettingsAction::None);
-            },
-        );
-
-        let reset_ctx = Context::default();
-        let _ = reset_ctx.run(
-            egui::RawInput {
-                events: vec![escape.clone()],
-                ..Default::default()
-            },
-            |ctx| {
-                let mut open = true;
-                let mut outcome = SettingsOutcome::default();
-                popup_dialog.handle_escape(ctx, &mut open, &mut outcome);
-                assert!(open);
-                assert!(!popup_dialog.reset_pending);
-                assert_eq!(outcome.action, SettingsAction::None);
-            },
-        );
-
-        let mut focused_dialog = SettingsDialog::default();
-        let focused_ctx = Context::default();
-        let mut text = String::new();
-        let _ = focused_ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                let response =
-                    ui.add(egui::TextEdit::singleline(&mut text).id_salt("test.text_edit"));
-                response.request_focus();
-            });
-            focused_dialog.remember_text_edit_focus(ctx);
-            assert!(focused_dialog.text_edit_focused_last_frame);
-        });
-        let _ = focused_ctx.run(
-            egui::RawInput {
-                events: vec![escape.clone()],
-                ..Default::default()
-            },
-            |ctx| {
-                let mut open = true;
-                let mut outcome = SettingsOutcome::default();
-                focused_dialog.handle_escape(ctx, &mut open, &mut outcome);
-                assert!(open);
-                assert_eq!(outcome.action, SettingsAction::None);
-            },
-        );
-
-        let mut close_dialog = SettingsDialog::default();
-        let close_ctx = Context::default();
-        let _ = close_ctx.run(
-            egui::RawInput {
-                events: vec![escape.clone()],
-                ..Default::default()
-            },
-            |ctx| {
-                let mut open = true;
-                let mut outcome = SettingsOutcome::default();
-                close_dialog.handle_escape(ctx, &mut open, &mut outcome);
-                assert!(!open);
-                assert_eq!(outcome.action, SettingsAction::Close);
-            },
-        );
-
-        let repeat_ctx = Context::default();
-        let _ = repeat_ctx.run(
-            egui::RawInput {
-                events: vec![escape.clone()],
-                ..Default::default()
-            },
-            |_| {},
-        );
-        let _ = repeat_ctx.run(
-            egui::RawInput {
-                events: vec![egui::Event::Key {
-                    key: egui::Key::Escape,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-                ..Default::default()
-            },
-            |ctx| {
-                let mut open = true;
-                let mut outcome = SettingsOutcome::default();
-                close_dialog.handle_escape(ctx, &mut open, &mut outcome);
-                assert!(open);
-                assert_eq!(outcome.action, SettingsAction::None);
-            },
-        );
-    }
-
-    #[test]
-    fn compact_dialog_stays_inside_logical_bounds_for_every_category_and_language() {
-        let ctx = Context::default();
-        let mut dialog = SettingsDialog {
-            is_open: true,
-            ..Default::default()
-        };
-        let mut config = ViewerConfig::default();
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(480.0, 320.0));
-        let bounds = screen.shrink(DIALOG_SAFETY_INSET);
-
-        for language in [Language::English, Language::Russian] {
-            config.general.language = language;
-            for category in SettingsCategory::ALL {
-                dialog.category = category;
-                for _ in 0..2 {
-                    render_dialog(&ctx, &mut dialog, &mut config, screen);
-                }
-                assert_dialog_in_bounds(&ctx, bounds);
-            }
-        }
-
-        dialog.reset_pending = true;
-        dialog.reset_focus_requested = true;
-        render_dialog(&ctx, &mut dialog, &mut config, screen);
-        render_dialog(&ctx, &mut dialog, &mut config, screen);
-        assert_dialog_in_bounds(&ctx, bounds);
-
-        dialog.reset_pending = false;
-        dialog.save_error = Some(SaveError::new(false, "access denied".repeat(20)));
-        render_dialog(&ctx, &mut dialog, &mut config, screen);
-        render_dialog(&ctx, &mut dialog, &mut config, screen);
-        assert_dialog_in_bounds(&ctx, bounds);
-        assert!(dialog.is_open);
-    }
-
-    #[test]
-    fn reset_failure_keeps_defaults_applied_and_save_retry_clears_the_error() {
+    fn failed_save_keeps_the_draft_separate_from_active_settings() {
+        let mut active = ViewerConfig::default();
         let mut dialog = SettingsDialog::default();
-        let mut config = ViewerConfig::default();
-        config.cache.max_ram_cache_mb = 256;
-        dialog.reset_with_save(&mut config, |_| Err("access denied".to_owned()));
+        dialog.open(&active);
+        dialog.draft.as_mut().unwrap().general.language = Language::Russian;
 
-        assert_eq!(
-            config.cache.max_ram_cache_mb,
-            ViewerConfig::default().cache.max_ram_cache_mb
-        );
-        assert!(dialog
-            .save_error
-            .as_ref()
-            .is_some_and(|error| error.after_reset));
+        assert!(!dialog.save_draft(&mut active, |_| Err("disk full".into())));
+        assert_eq!(active.general.language, Language::English);
+        assert_eq!(dialog.save_error.as_deref(), Some("disk full"));
+        assert!(dialog.is_open());
 
-        let retrying_reset_save = dialog
-            .save_error
-            .as_ref()
-            .is_some_and(|error| error.after_reset);
-        assert!(!dialog.save_result(retrying_reset_save, Err("still denied".to_owned())));
-        assert!(dialog
-            .save_error
-            .as_ref()
-            .is_some_and(|error| error.after_reset));
-
-        assert!(dialog.save_result(false, Ok(())));
+        assert!(dialog.save_draft(&mut active, |draft| {
+            assert_eq!(draft.general.language, Language::Russian);
+            Ok(())
+        }));
+        assert_eq!(active.general.language, Language::Russian);
         assert!(dialog.save_error.is_none());
-    }
-
-    #[test]
-    fn opaque_compatibility_does_not_change_saved_transparency_preference() {
-        let mut config = ViewerConfig::default();
-        let original = config.window.transparent_windowed_background;
-        let mut dialog = SettingsDialog {
-            is_open: true,
-            ..Default::default()
-        };
-        let ctx = Context::default();
-        let _ = ctx.run(Default::default(), |ctx| {
-            dialog.show(ctx, &mut config, true);
-        });
-        assert_eq!(config.window.transparent_windowed_background, original);
+        assert!(!dialog.is_open());
     }
 }

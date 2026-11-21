@@ -16,7 +16,13 @@ use crate::navigation::{
     render_edge_chevrons, FolderNavigator, FolderScan, NavAction, SUPPORTED_IMAGE_EXTENSIONS,
 };
 use crate::presentation::PresentationPolicy;
-use crate::settings_dialog::{SettingsChanges, SettingsDialog};
+use crate::settings_dialog::SettingsDialog;
+
+#[derive(Clone, Copy, Default)]
+struct SettingsChanges {
+    filter: bool,
+    cache: bool,
+}
 
 #[derive(Clone, Copy)]
 enum ToolbarIcon {
@@ -592,13 +598,16 @@ impl ImageViewerApp {
         match self.window_mode {
             WindowMode::Overlay => {
                 self.window_mode = WindowMode::Windowed;
-                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+                #[cfg(not(windows))]
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
-                ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+                // Let the window system restore its previous placement, including
+                // the size and maximized state, instead of forcing maximize.
+                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
                 self.show_toast(self.tr("Mode: Windowed", "Режим: оконный"));
             }
             WindowMode::Windowed => {
                 self.window_mode = WindowMode::Overlay;
+                #[cfg(not(windows))]
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
                 ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
                 self.show_toast(
@@ -712,7 +721,7 @@ impl ImageViewerApp {
     }
 
     pub fn handle_keyboard_inputs(&mut self, ctx: &Context) {
-        if self.settings_dialog.is_open {
+        if self.settings_dialog.is_open() {
             return;
         }
         // A key held in Settings remains owned by Settings until a fresh press.
@@ -747,6 +756,12 @@ impl ImageViewerApp {
             n_pressed,
             i_pressed,
         ) = ctx.input(|i| {
+            let pressed_once = |shortcut| {
+                i.events.iter().any(|event| {
+                    matches!(event, egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. }
+                        if *key == shortcut && modifiers.is_none())
+                })
+            };
             (
                 i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::A),
                 i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::D),
@@ -755,26 +770,20 @@ impl ImageViewerApp {
                 i.key_pressed(egui::Key::F),
                 i.key_pressed(egui::Key::Num0),
                 i.key_pressed(egui::Key::Num1),
-                i.key_pressed(egui::Key::F11),
-                i.events.iter().any(|event| {
-                    matches!(
-                        event,
-                        egui::Event::Key {
-                            key: egui::Key::Escape,
-                            pressed: true,
-                            repeat: false,
-                            ..
-                        }
-                    )
-                }),
+                pressed_once(egui::Key::F11),
+                pressed_once(egui::Key::Escape),
                 i.key_pressed(egui::Key::O),
-                i.key_pressed(egui::Key::S),
+                pressed_once(egui::Key::S),
                 i.key_pressed(egui::Key::T),
                 i.key_pressed(egui::Key::N),
                 i.key_pressed(egui::Key::I),
             )
         });
 
+        if s_pressed {
+            self.open_settings(ctx);
+            return;
+        }
         if left_pressed {
             self.navigate_prev();
         }
@@ -818,9 +827,6 @@ impl ImageViewerApp {
                 self.open_target(&file, ctx);
             }
         }
-        if s_pressed {
-            self.settings_dialog.is_open = !self.settings_dialog.is_open;
-        }
         if t_pressed {
             use crate::config::FilmstripVisibility;
             self.config.filmstrip.visibility = match self.config.filmstrip.visibility {
@@ -861,8 +867,17 @@ impl ImageViewerApp {
         }
     }
 
+    fn open_settings(&mut self, ctx: &Context) {
+        ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+        self.settings_dialog.open(&self.config);
+    }
+
     pub fn handle_drag_and_drop(&mut self, ctx: &Context) {
-        if self.settings_dialog.is_open {
+        if self.settings_dialog.is_open() {
             return;
         }
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
@@ -899,9 +914,6 @@ impl ImageViewerApp {
                 self.config.cache.thumbnail_cache_count,
             );
         }
-        if changes.window_mode && self.window_mode != self.config.window.mode {
-            self.toggle_window_mode(ctx);
-        }
     }
 
     pub fn update_ui_fade(&mut self, ctx: &Context, cursor_pos: Option<Pos2>, dt: f32) {
@@ -912,13 +924,17 @@ impl ImageViewerApp {
         }
 
         let elapsed = self.last_mouse_activity.elapsed().as_secs_f32();
-        let timeout = self.config.window.ui_fade_timeout_secs.max(0.0);
-        if self.config.window.auto_hide_ui && elapsed < timeout && !self.settings_dialog.is_open {
-            ctx.request_repaint_after(Duration::from_secs_f32(timeout - elapsed));
+        if self.config.window.auto_hide_ui && !self.settings_dialog.is_open() {
+            let until_idle = self.config.window.ui_fade_timeout_secs - elapsed;
+            if until_idle > 0.0 {
+                if let Ok(delay) = Duration::try_from_secs_f32(until_idle) {
+                    ctx.request_repaint_after(delay);
+                }
+            }
         }
         let target_opacity = if !self.config.window.auto_hide_ui
-            || self.settings_dialog.is_open
-            || elapsed < timeout
+            || self.settings_dialog.is_open()
+            || elapsed < self.config.window.ui_fade_timeout_secs
         {
             1.0_f32
         } else {
@@ -967,9 +983,9 @@ impl eframe::App for ImageViewerApp {
         let first_pass = ctx.output(|output| output.num_completed_passes) == 0;
         self.process_frame_results(ctx);
         // Handle hotkeys & drag-and-drop
-        let settings_was_open = self.settings_dialog.is_open;
+        let settings_was_open = self.settings_dialog.is_open();
         self.handle_keyboard_inputs(ctx);
-        let viewer_blocked = settings_was_open || self.settings_dialog.is_open;
+        let viewer_blocked = settings_was_open || self.settings_dialog.is_open();
         if !viewer_blocked
             && ctx.input(|input| input.key_pressed(egui::Key::Space))
             && self
@@ -1049,6 +1065,9 @@ impl eframe::App for ImageViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(bg_color))
             .show(ctx, |ui| {
+                if viewer_blocked {
+                    ui.disable();
+                }
                 let viewport = ui.available_rect_before_wrap();
                 let filmstrip_height = self.config.filmstrip.thumbnail_size as f32 + 48.0;
                 let pointer_over_filmstrip = self.config.filmstrip.visibility
@@ -1141,7 +1160,7 @@ impl eframe::App for ImageViewerApp {
                     self.navigator.current_index,
                     &self.config.filmstrip,
                     viewport,
-                    cursor_pos,
+                    if viewer_blocked { None } else { cursor_pos },
                     dt,
                 );
                 if let Some(idx) = film_resp.selected_index {
@@ -1204,7 +1223,7 @@ impl eframe::App for ImageViewerApp {
                         tr("Settings (S)", "Настройки (S)"),
                         self.ui_opacity,
                     ) {
-                        self.settings_dialog.is_open = true;
+                        self.open_settings(ctx);
                     }
                     if icon_button(
                         ui,
@@ -1377,6 +1396,7 @@ impl eframe::App for ImageViewerApp {
             egui::Window::new(tr("Could not open image", "Не удалось открыть изображение"))
                 .id(egui::Id::new("load-error"))
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .enabled(!viewer_blocked)
                 .collapsible(false)
                 .resizable(false)
                 .fixed_size(Vec2::new(420.0, 150.0))
@@ -1412,14 +1432,24 @@ impl eframe::App for ImageViewerApp {
         }
 
         // 7. Settings Dialog
-        let settings_open_before_show = self.settings_dialog.is_open;
-        let outcome =
+        let settings_open_before_show = self.settings_dialog.is_open();
+        let previous_filter = self.config.rendering.filter_mode;
+        let previous_cache_limit = self.config.cache.max_ram_cache_mb;
+        let saved =
             self.settings_dialog
                 .show(ctx, &mut self.config, self.presentation.opaque_window());
-        if settings_open_before_show && !self.settings_dialog.is_open {
+        if settings_open_before_show && !self.settings_dialog.is_open() {
             self.record_settings_close(ctx);
         }
-        self.apply_settings_changes(ctx, outcome.changes);
+        if saved {
+            self.apply_settings_changes(
+                ctx,
+                SettingsChanges {
+                    filter: previous_filter != self.config.rendering.filter_mode,
+                    cache: previous_cache_limit != self.config.cache.max_ram_cache_mb,
+                },
+            );
+        }
     }
 }
 
@@ -1547,7 +1577,7 @@ mod tests {
     #[test]
     fn settings_block_viewer_keys_and_file_drops() {
         let (mut app, ctx) = test_app();
-        app.settings_dialog.is_open = true;
+        app.settings_dialog.open(&app.config);
         app.navigator.files = vec![PathBuf::from("one.png"), PathBuf::from("two.png")];
         let original_mode = app.window_mode;
         let original_filter = app.config.rendering.filter_mode;
@@ -1583,7 +1613,7 @@ mod tests {
         assert_eq!(app.window_mode, original_mode);
         assert_eq!(app.config.rendering.filter_mode, original_filter);
         assert_eq!(app.scan_generation, 0);
-        assert!(app.settings_dialog.is_open);
+        assert!(app.settings_dialog.is_open());
     }
 
     #[test]
@@ -1642,19 +1672,10 @@ mod tests {
         app.apply_settings_changes(
             &ctx,
             SettingsChanges {
-                any: true,
                 ..Default::default()
             },
         );
         assert_eq!(app.window_mode, runtime_mode);
-        app.apply_settings_changes(
-            &ctx,
-            SettingsChanges {
-                window_mode: true,
-                ..Default::default()
-            },
-        );
-        assert_eq!(app.window_mode, default_mode);
     }
 
     #[test]
@@ -1667,7 +1688,6 @@ mod tests {
             app.apply_settings_changes(
                 ctx,
                 SettingsChanges {
-                    any: true,
                     ..Default::default()
                 },
             );
@@ -1687,7 +1707,6 @@ mod tests {
         let image_texture = app.canvas_state.texture.as_ref().unwrap().id();
         app.config.rendering.filter_mode = crate::config::FilterMode::Nearest;
         let changes = SettingsChanges {
-            any: true,
             filter: true,
             ..Default::default()
         };
@@ -1750,7 +1769,7 @@ mod tests {
     fn held_escape_cannot_toggle_the_viewer_after_settings_closes() {
         let (mut app, ctx) = test_app();
         let initial_mode = app.window_mode;
-        app.settings_dialog.is_open = true;
+        app.settings_dialog.open(&app.config);
         let initial_press = egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::Escape,
@@ -1762,7 +1781,7 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run(initial_press, |ctx| app.handle_keyboard_inputs(ctx));
-        app.settings_dialog.is_open = false;
+        app.settings_dialog.cancel();
         let input = egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::Escape,
@@ -1781,7 +1800,7 @@ mod tests {
     fn keys_held_in_settings_need_a_fresh_press_before_navigation() {
         let (mut app, ctx) = test_app();
         app.navigator.files = vec![PathBuf::from("one.png"), PathBuf::from("two.png")];
-        app.settings_dialog.is_open = true;
+        app.settings_dialog.open(&app.config);
         let key_input = |pressed, repeat| egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::ArrowRight,
@@ -1795,7 +1814,7 @@ mod tests {
         let _ = ctx.run(key_input(true, false), |ctx| {
             app.handle_keyboard_inputs(ctx)
         });
-        app.settings_dialog.is_open = false;
+        app.settings_dialog.cancel();
         app.record_settings_close(&ctx);
         let _ = ctx.run(key_input(true, true), |ctx| app.handle_keyboard_inputs(ctx));
         assert_eq!(app.navigator.current_index, 0);

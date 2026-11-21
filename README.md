@@ -15,7 +15,7 @@ Viewlume is a fast, GPU-accelerated image viewer for Linux and Windows. It keeps
 
 - GPU rendering through `egui`, `eframe`, and `wgpu`.
 - Background decoding, bounded thumbnail work, adjacent-image prefetching, and RAM caches.
-- Visual size and on-screen position preserved when switching between different resolutions.
+- Fitted images stay fitted when you switch images or resize the window. Manual zoom and pan carry across images.
 - Cursor-centered zoom and short, configurable pan inertia.
 - Frameless fullscreen overlay with auto-hiding controls.
 - Scrollable cover-flow carousel with virtualized thumbnails.
@@ -142,9 +142,14 @@ Viewlume stores settings in the platform configuration directory:
 An existing configuration from the former `image-viewer` name is migrated automatically on first launch.
 The interface supports English and Russian; English is used by default.
 
+Press `S` to open Settings. Use the General, Image, Navigation, and Advanced tabs to find a setting.
+Select Save to apply and keep your changes. Cancel or `Esc` discards unsaved edits.
+Restore defaults previews the default settings in the dialog; the saved settings change only when you select Save.
+The startup window mode takes effect the next time you start Viewlume.
+
 ### Texture filtering
 
-In Settings > Rendering, Auto uses smooth minification and nearest-neighbor magnification in
+In Settings > Image, Auto uses smooth minification and nearest-neighbor magnification in
 physical display pixels. Display scaling therefore affects the threshold where Auto changes
 behavior. Choose Bilinear for consistently smooth enlargement.
 
