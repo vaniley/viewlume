@@ -4,13 +4,17 @@ pub mod app;
 pub mod cache;
 pub mod canvas;
 pub mod config;
+pub mod diagnostics;
 pub mod filmstrip;
 pub mod loader;
 pub mod navigation;
+pub mod presentation;
 pub mod settings_dialog;
 
 use app::ImageViewerApp;
 use config::{ViewerConfig, WindowMode};
+use diagnostics::{record_renderer_state, record_runtime_panic, record_startup_failure};
+use presentation::PresentationPolicy;
 use std::env;
 use std::path::PathBuf;
 
@@ -29,6 +33,9 @@ fn main() -> eframe::Result<()> {
     };
 
     let config = ViewerConfig::load();
+    let presentation = PresentationPolicy::from_environment();
+    install_panic_diagnostics(presentation);
+    let language = config.general.language;
     let is_overlay = config.window.mode == WindowMode::Overlay;
 
     let viewport_builder = egui::ViewportBuilder::default()
@@ -40,7 +47,7 @@ fn main() -> eframe::Result<()> {
         // their native style enabled so leaving fullscreen restores both.
         .with_decorations(cfg!(windows) || !is_overlay)
         .with_fullscreen(is_overlay)
-        .with_transparent(true)
+        .with_transparent(presentation.transparent_window())
         .with_drag_and_drop(true);
 
     let native_options = eframe::NativeOptions {
@@ -49,9 +56,62 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Viewlume",
         native_options,
-        Box::new(move |cc| Ok(Box::new(ImageViewerApp::new(cc, initial_target, config)))),
-    )
+        Box::new(move |cc| {
+            record_renderer_state(cc, presentation);
+            Ok(Box::new(ImageViewerApp::new(
+                cc,
+                initial_target,
+                config,
+                presentation,
+            )))
+        }),
+    );
+
+    if let Err(error) = &result {
+        record_startup_failure(presentation, &error.to_string());
+        show_startup_error(language, presentation);
+    }
+
+    result
+}
+
+fn install_panic_diagnostics(presentation: PresentationPolicy) {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let location = panic_info
+            .location()
+            .map(|location| (location.line(), location.column()));
+        let _ = std::panic::catch_unwind(|| record_runtime_panic(presentation, location));
+        previous_hook(panic_info);
+    }));
+}
+
+fn show_startup_error(language: config::Language, presentation: PresentationPolicy) {
+    let russian = language.is_russian();
+    let description = if cfg!(target_os = "windows") && !presentation.opaque_window() {
+        if russian {
+            "Viewlume не удалось запустить GPU-рендерер. Подробности могут быть доступны в diagnostics.log рядом с config.toml.\n\nЕсли ошибка связана с прозрачным окном, задавайте VIEWLUME_OPAQUE_WINDOW=1 для каждого проблемного запуска. Это может помочь с совместимостью композитора и прозрачности, но не исправляет недоступный адаптер или неподдерживаемый драйвер."
+        } else {
+            "Viewlume could not start its GPU renderer. Details may be available in diagnostics.log beside config.toml.\n\nIf this involves a transparent window, set VIEWLUME_OPAQUE_WINDOW=1 for each affected launch. It can help compositor/transparency compatibility, but cannot fix an unavailable adapter or unsupported driver."
+        }
+    } else if russian {
+        "Viewlume не удалось запустить GPU-рендерер. Подробности могут быть доступны в diagnostics.log рядом с config.toml."
+    } else {
+        "Viewlume could not start its GPU renderer. Details may be available in diagnostics.log beside config.toml."
+    };
+
+    let title = if russian {
+        "Ошибка запуска Viewlume"
+    } else {
+        "Viewlume startup error"
+    };
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title(title)
+        .set_description(description)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
 }

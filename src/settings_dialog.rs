@@ -44,8 +44,13 @@ impl SettingsDialog {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn cancel(&mut self) {
+        self.draft = None;
+    }
+
     /// Return true only when the saved draft replaces the active settings.
-    pub fn show(&mut self, ctx: &Context, config: &mut ViewerConfig) -> bool {
+    pub fn show(&mut self, ctx: &Context, config: &mut ViewerConfig, opaque_window: bool) -> bool {
         let Some(draft) = self.draft.as_mut() else {
             return false;
         };
@@ -133,7 +138,7 @@ impl SettingsDialog {
                                 ui.add(egui::Label::new(error).wrap());
                             }
                             match self.tab {
-                                Tab::General => general(ui, draft, &tr),
+                                Tab::General => general(ui, draft, &tr, opaque_window),
                                 Tab::Image => image(ui, draft, &tr),
                                 Tab::Navigation => navigation(ui, draft, &tr),
                                 Tab::Advanced => advanced(ui, draft, &tr),
@@ -230,7 +235,7 @@ fn slider(ui: &mut Ui, label: &'static str, slider: Slider<'_>) {
     ui.add(slider).labelled_by(label.id);
 }
 
-fn general(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
+fn general(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate, opaque_window: bool) {
     ui.heading(tr("Language", "Язык"));
     choice(
         ui,
@@ -269,13 +274,22 @@ fn general(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
             "Скрывать элементы управления при бездействии",
         ),
     );
-    ui.checkbox(
-        &mut config.window.transparent_windowed_background,
-        tr(
-            "Transparent background in windowed mode",
-            "Прозрачный фон в оконном режиме",
+    ui.add_enabled(
+        !opaque_window,
+        egui::Checkbox::new(
+            &mut config.window.transparent_windowed_background,
+            tr(
+                "Transparent background in windowed mode",
+                "Прозрачный фон в оконном режиме",
+            ),
         ),
     );
+    if opaque_window {
+        ui.label(tr(
+            "This launch uses an opaque window.",
+            "Этот запуск использует непрозрачное окно.",
+        ));
+    }
 }
 
 fn image(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
@@ -435,10 +449,6 @@ fn advanced(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
             .step_by(128.0)
             .suffix(tr(" MB", " МБ")),
     );
-    ui.label(tr(
-        "Restart Viewlume to apply the cache limit.",
-        "Перезапустите Viewlume, чтобы применить лимит кеша.",
-    ));
     ui.add_space(ui.spacing().item_spacing.y);
     slider(
         ui,
