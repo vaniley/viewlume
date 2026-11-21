@@ -1,6 +1,6 @@
 [package]
 name = "viewlume"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 authors = ["vaniley"]
 description = "A fast, GPU-accelerated image viewer with fluid navigation"
@@ -40,7 +40,7 @@ image = { version = "0.25", default-features = false, features = [
     "qoi",
 ] }
 fast_image_resize = { version = "6", features = ["rayon"] }
-kamadak-exif = "0.5"
+kamadak-exif = "0.6"
 
 # Concurrency and Data Structures
 crossbeam-channel = "0.5"
@@ -50,7 +50,7 @@ quick_cache = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 tempfile = "3"
-directories = "5.0"
+directories = "6.0"
 natord = "1.0"
 rfd = "0.15"
 

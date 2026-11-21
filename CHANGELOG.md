@@ -4,6 +4,30 @@ All notable changes to Viewlume are documented in this file. The project follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-21
+
+### Changed
+
+- Group Settings into four tabs with a scrollable body. Apply edits only after Save succeeds.
+- Refit fitted images on navigation and resize. Keep manual zoom and pan in place.
+- Reduce redundant GPU uploads and apply image cache limit changes without restarting.
+
+### Fixed
+
+- Keep the native Windows resize frame and restore the previous window placement after fullscreen.
+- Keep edited settings available if writing the configuration fails.
+- Fix cached opens and texture lifetime during rendering. Report images that exceed the GPU texture limit.
+
+### Added
+
+- Add an opaque-window launch option (`VIEWLUME_OPAQUE_WINDOW=1`) and startup diagnostics for renderer compatibility.
+
+## [0.2.2] - 2026-09-15
+
+### Fixed
+
+- Hide the Windows console, improve fullscreen overlay startup, and set the executable icon.
+
 ## [0.2.1] - 2026-09-15
 
 ### Fixed
@@ -49,7 +73,9 @@ All notable changes to Viewlume are documented in this file. The project follows
 - Zoom and position loss when switching between images with different resolutions.
 - Runaway panning caused by applying cumulative drag displacement every frame.
 
-[Unreleased]: https://github.com/vaniley/viewlume/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/vaniley/viewlume/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/vaniley/viewlume/compare/v0.2.2...v0.3.0
+[0.2.2]: https://github.com/vaniley/viewlume/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/vaniley/viewlume/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/vaniley/viewlume/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/vaniley/viewlume/releases/tag/v0.1.0
