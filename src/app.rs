@@ -196,7 +196,11 @@ impl ImageViewerApp {
         }
     }
 
-    pub fn new(cc: &eframe::CreationContext<'_>, initial_target: Option<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial_target: Option<PathBuf>,
+        config: ViewerConfig,
+    ) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = Color32::from_rgb(12, 14, 18);
         visuals.window_fill = Color32::from_rgb(24, 27, 33);
@@ -206,7 +210,6 @@ impl ImageViewerApp {
         visuals.widgets.hovered.rounding = egui::Rounding::same(7.0);
         visuals.widgets.active.rounding = egui::Rounding::same(7.0);
         cc.egui_ctx.set_visuals(visuals);
-        let config = ViewerConfig::load();
         let cache = Arc::new(ImageCache::new(
             config.cache.max_ram_cache_mb,
             config.cache.thumbnail_cache_count,
@@ -477,13 +480,16 @@ impl ImageViewerApp {
         match self.window_mode {
             WindowMode::Overlay => {
                 self.window_mode = WindowMode::Windowed;
-                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+                #[cfg(not(windows))]
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
-                ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+                // Let the window system restore its previous placement, including
+                // the size and maximized state, instead of forcing maximize.
+                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
                 self.show_toast(self.tr("Mode: Windowed", "Режим: оконный"));
             }
             WindowMode::Windowed => {
                 self.window_mode = WindowMode::Overlay;
+                #[cfg(not(windows))]
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
                 ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
                 self.show_toast(
@@ -627,6 +633,9 @@ impl ImageViewerApp {
     }
 
     pub fn handle_keyboard_inputs(&mut self, ctx: &Context) {
+        if self.settings_dialog.is_open() {
+            return;
+        }
         let (
             left_pressed,
             right_pressed,
@@ -643,6 +652,12 @@ impl ImageViewerApp {
             n_pressed,
             i_pressed,
         ) = ctx.input(|i| {
+            let pressed_once = |shortcut| {
+                i.events.iter().any(|event| {
+                    matches!(event, egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. }
+                        if *key == shortcut && modifiers.is_none())
+                })
+            };
             (
                 i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::A),
                 i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::D),
@@ -651,16 +666,20 @@ impl ImageViewerApp {
                 i.key_pressed(egui::Key::F),
                 i.key_pressed(egui::Key::Num0),
                 i.key_pressed(egui::Key::Num1),
-                i.key_pressed(egui::Key::F11),
-                i.key_pressed(egui::Key::Escape),
+                pressed_once(egui::Key::F11),
+                pressed_once(egui::Key::Escape),
                 i.key_pressed(egui::Key::O),
-                i.key_pressed(egui::Key::S),
+                pressed_once(egui::Key::S),
                 i.key_pressed(egui::Key::T),
                 i.key_pressed(egui::Key::N),
                 i.key_pressed(egui::Key::I),
             )
         });
 
+        if s_pressed {
+            self.open_settings(ctx);
+            return;
+        }
         if left_pressed {
             self.navigate_prev();
         }
@@ -693,12 +712,8 @@ impl ImageViewerApp {
         if f11_pressed {
             self.toggle_window_mode(ctx);
         }
-        if esc_pressed {
-            if self.settings_dialog.is_open {
-                self.settings_dialog.is_open = false;
-            } else if self.window_mode == WindowMode::Overlay {
-                self.toggle_window_mode(ctx);
-            }
+        if esc_pressed && self.window_mode == WindowMode::Overlay {
+            self.toggle_window_mode(ctx);
         }
         if o_pressed {
             if let Some(file) = rfd::FileDialog::new()
@@ -707,9 +722,6 @@ impl ImageViewerApp {
             {
                 self.open_target(&file, ctx);
             }
-        }
-        if s_pressed {
-            self.settings_dialog.is_open = !self.settings_dialog.is_open;
         }
         if t_pressed {
             use crate::config::FilmstripVisibility;
@@ -754,6 +766,15 @@ impl ImageViewerApp {
         }
     }
 
+    fn open_settings(&mut self, ctx: &Context) {
+        ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+        self.settings_dialog.open(&self.config);
+    }
+
     pub fn handle_drag_and_drop(&mut self, ctx: &Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
@@ -772,7 +793,16 @@ impl ImageViewerApp {
         }
 
         let elapsed = self.last_mouse_activity.elapsed().as_secs_f32();
+        if self.config.window.auto_hide_ui && !self.settings_dialog.is_open() {
+            let until_idle = self.config.window.ui_fade_timeout_secs - elapsed;
+            if until_idle > 0.0 {
+                if let Ok(delay) = Duration::try_from_secs_f32(until_idle) {
+                    ctx.request_repaint_after(delay);
+                }
+            }
+        }
         let target_opacity = if !self.config.window.auto_hide_ui
+            || self.settings_dialog.is_open()
             || elapsed < self.config.window.ui_fade_timeout_secs
         {
             1.0_f32
@@ -848,7 +878,9 @@ impl eframe::App for ImageViewerApp {
 
         // Handle hotkeys & drag-and-drop
         self.handle_keyboard_inputs(ctx);
-        if ctx.input(|input| input.key_pressed(egui::Key::Space))
+        let settings_open = self.settings_dialog.is_open();
+        if !settings_open
+            && ctx.input(|input| input.key_pressed(egui::Key::Space))
             && self
                 .current_image
                 .as_ref()
@@ -862,7 +894,9 @@ impl eframe::App for ImageViewerApp {
                 self.tr("Animation playing", "Анимация воспроизводится")
             });
         }
-        self.handle_drag_and_drop(ctx);
+        if !settings_open {
+            self.handle_drag_and_drop(ctx);
+        }
 
         // Manage UI auto-fade
         self.update_ui_fade(ctx, cursor_pos, dt);
@@ -884,6 +918,9 @@ impl eframe::App for ImageViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(bg_color))
             .show(ctx, |ui| {
+                if settings_open {
+                    ui.disable();
+                }
                 let viewport = ui.available_rect_before_wrap();
                 let filmstrip_height = self.config.filmstrip.thumbnail_size as f32 + 48.0;
                 let pointer_over_filmstrip = self.config.filmstrip.visibility
@@ -965,7 +1002,7 @@ impl eframe::App for ImageViewerApp {
                     self.navigator.current_index,
                     &self.config.filmstrip,
                     viewport,
-                    cursor_pos,
+                    if settings_open { None } else { cursor_pos },
                     dt,
                 );
                 if let Some(idx) = film_resp.selected_index {
@@ -1028,7 +1065,7 @@ impl eframe::App for ImageViewerApp {
                         tr("Settings (S)", "Настройки (S)"),
                         self.ui_opacity,
                     ) {
-                        self.settings_dialog.is_open = true;
+                        self.open_settings(ctx);
                     }
                     if icon_button(
                         ui,
@@ -1158,6 +1195,9 @@ impl eframe::App for ImageViewerApp {
             egui::Area::new(egui::Id::new("animation-controls"))
                 .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(16.0, -16.0))
                 .show(ctx, |ui| {
+                    if settings_open {
+                        ui.disable();
+                    }
                     egui::Frame::none()
                         .fill(Color32::from_rgba_premultiplied(18, 20, 25, 232))
                         .rounding(8.0)
@@ -1198,6 +1238,7 @@ impl eframe::App for ImageViewerApp {
             egui::Window::new(tr("Could not open image", "Не удалось открыть изображение"))
                 .id(egui::Id::new("load-error"))
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .enabled(!settings_open)
                 .collapsible(false)
                 .resizable(false)
                 .fixed_size(Vec2::new(420.0, 150.0))
@@ -1229,9 +1270,10 @@ impl eframe::App for ImageViewerApp {
             }
         }
 
-        // 7. Settings Dialog
-        if self.settings_dialog.show(ctx, &mut self.config) {
-            // Re-apply settings if changed
+        let previous_filter = self.config.rendering.filter_mode;
+        if self.settings_dialog.show(ctx, &mut self.config)
+            && self.config.rendering.filter_mode != previous_filter
+        {
             if let Some(ref img) = self.current_image {
                 self.canvas_state.update_texture(
                     ctx,

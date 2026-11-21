@@ -31,22 +31,17 @@ fn main() -> eframe::Result<()> {
     let config = ViewerConfig::load();
     let is_overlay = config.window.mode == WindowMode::Overlay;
 
-    let mut viewport_builder = egui::ViewportBuilder::default()
+    let viewport_builder = egui::ViewportBuilder::default()
         .with_title("Viewlume")
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([480.0, 320.0])
-        // Transparency must be requested when the native window is created;
-        // windowed mode still paints an opaque central panel.
+        .with_resizable(true)
+        // Windows fullscreen already masks the caption and resize frame. Keep
+        // their native style enabled so leaving fullscreen restores both.
+        .with_decorations(cfg!(windows) || !is_overlay)
+        .with_fullscreen(is_overlay)
         .with_transparent(true)
         .with_drag_and_drop(true);
-
-    if is_overlay {
-        viewport_builder = viewport_builder
-            .with_decorations(false)
-            .with_fullscreen(true);
-    } else {
-        viewport_builder = viewport_builder.with_decorations(true).with_maximized(true);
-    }
 
     let native_options = eframe::NativeOptions {
         viewport: viewport_builder,
@@ -57,6 +52,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Viewlume",
         native_options,
-        Box::new(move |cc| Ok(Box::new(ImageViewerApp::new(cc, initial_target)))),
+        Box::new(move |cc| Ok(Box::new(ImageViewerApp::new(cc, initial_target, config)))),
     )
 }

@@ -21,6 +21,8 @@ pub struct CanvasState {
     pan_velocity: Vec2,
     preserved_extent: Option<f32>,
     preserved_center: Option<Vec2>,
+    viewport: Option<Rect>,
+    fit_to_viewport: bool,
     current_image_size: Vec2,
     outgoing: Option<OutgoingImage>,
     transition_progress: f32,
@@ -42,6 +44,8 @@ impl Default for CanvasState {
             pan_velocity: Vec2::ZERO,
             preserved_extent: None,
             preserved_center: None,
+            viewport: None,
+            fit_to_viewport: false,
             current_image_size: Vec2::ZERO,
             outgoing: None,
             transition_progress: 1.0,
@@ -76,6 +80,7 @@ impl CanvasState {
         self.target_pan = self.pan;
         self.pan_velocity = Vec2::ZERO;
         self.initialized = true;
+        self.viewport = Some(viewport);
     }
 
     pub fn reset_view_fit(&mut self, img_w: f32, img_h: f32, viewport: Rect) {
@@ -84,6 +89,7 @@ impl CanvasState {
         }
         self.preserved_extent = None;
         self.preserved_center = None;
+        self.fit_to_viewport = true;
         self.set_view(
             img_w,
             img_h,
@@ -96,12 +102,17 @@ impl CanvasState {
     pub fn reset_view_actual_size(&mut self, img_w: f32, img_h: f32, viewport: Rect) {
         self.preserved_extent = None;
         self.preserved_center = None;
+        self.fit_to_viewport = false;
         self.set_view(img_w, img_h, viewport, 1.0, None);
     }
 
     /// Preserve both visual size and the on-screen center across image changes.
     pub fn prepare_image_change(&mut self, image: Option<&DecodedImage>) {
-        if let Some(image) = image {
+        if self.fit_to_viewport {
+            // Keep fitting new images until the user chooses a manual view.
+            self.preserved_extent = None;
+            self.preserved_center = None;
+        } else if let Some(image) = image {
             let rendered_size =
                 Vec2::new(image.width as f32, image.height as f32) * self.target_scale as f32;
             self.preserved_extent = Some(rendered_size.x.max(rendered_size.y));
@@ -115,6 +126,7 @@ impl CanvasState {
     }
 
     fn initialize_image(&mut self, img_w: f32, img_h: f32, viewport: Rect, cfg: &RenderingConfig) {
+        self.fit_to_viewport = self.preserved_extent.is_none();
         let scale = self
             .preserved_extent
             .take()
@@ -123,6 +135,32 @@ impl CanvasState {
             .clamp(cfg.min_zoom, cfg.max_zoom);
         let center = self.preserved_center.take();
         self.set_view(img_w, img_h, viewport, scale, center);
+    }
+
+    fn resize_viewport(&mut self, viewport: Rect, cfg: &RenderingConfig) {
+        let Some(previous) = self.viewport else {
+            return;
+        };
+        if previous == viewport || viewport.width() <= 0.0 || viewport.height() <= 0.0 {
+            return;
+        }
+
+        let shift = viewport.center() - previous.center();
+        if let Some(center) = &mut self.preserved_center {
+            *center += shift;
+        }
+        if let Some(outgoing) = &mut self.outgoing {
+            outgoing.rect = outgoing.rect.translate(shift);
+        }
+        if self.fit_to_viewport {
+            let size = self.current_image_size;
+            let scale = Self::fit_scale(size.x, size.y, viewport).clamp(cfg.min_zoom, cfg.max_zoom);
+            self.set_view(size.x, size.y, viewport, scale, None);
+        } else {
+            self.pan += shift;
+            self.target_pan += shift;
+            self.viewport = Some(viewport);
+        }
     }
 
     pub fn get_texture_options(filter_mode: FilterMode, scale: f64) -> TextureOptions {
@@ -274,6 +312,15 @@ pub fn render_canvas(
         if !state.initialized {
             state.initialize_image(image.width as f32, image.height as f32, rect, render_cfg);
             state.sync_texture_options(current_image);
+        } else {
+            let old_options =
+                CanvasState::get_texture_options(state.current_filter, state.target_scale);
+            state.resize_viewport(rect, render_cfg);
+            if old_options
+                != CanvasState::get_texture_options(state.current_filter, state.target_scale)
+            {
+                state.sync_texture_options(current_image);
+            }
         }
     }
 
@@ -295,6 +342,7 @@ pub fn render_canvas(
                     mouse - (mouse - state.target_pan) * (new_target / old_target) as f32;
             }
             state.target_scale = new_target;
+            state.fit_to_viewport = false;
             state.sync_texture_options(current_image);
         }
     }
@@ -303,6 +351,7 @@ pub fn render_canvas(
         || response.dragged_by(egui::PointerButton::Secondary)
         || response.dragged_by(egui::PointerButton::Middle);
     if dragging {
+        state.fit_to_viewport = false;
         // pointer.delta is per-frame; Response::drag_delta is cumulative and caused runaway panning.
         let delta = ui.input(|i| i.pointer.delta());
         state.pan += delta;
@@ -415,6 +464,7 @@ mod tests {
         let old = decoded(1920, 1080);
         let mut state = CanvasState::default();
         state.reset_view_fit(old.width as f32, old.height as f32, viewport);
+        state.fit_to_viewport = false; // the user panned the view
         state.target_pan += Vec2::new(73.0, -41.0);
         let old_extent = old.width as f32 * state.target_scale as f32;
         let old_center = state.target_pan
@@ -441,5 +491,55 @@ mod tests {
 
         let opts_scaled_down = CanvasState::get_texture_options(FilterMode::Auto, 0.5);
         assert_eq!(opts_scaled_down.magnification, egui::TextureFilter::Linear);
+    }
+
+    #[test]
+    fn fitted_image_refits_and_stays_centered_on_resize() {
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0));
+        let smaller = Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 320.0));
+        let config = RenderingConfig::default();
+        let mut canvas = CanvasState::default();
+        canvas.reset_view_fit(1000.0, 800.0, viewport);
+        let old_scale = canvas.scale;
+
+        canvas.resize_viewport(smaller, &config);
+
+        assert!(canvas.scale < old_scale);
+        assert_eq!(canvas.target_scale, canvas.scale);
+        let center = canvas.pan + Vec2::new(1000.0, 800.0) * canvas.scale as f32 * 0.5;
+        assert_eq!(center, smaller.center().to_vec2());
+    }
+
+    #[test]
+    fn fitted_view_survives_navigation_between_different_resolutions() {
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0));
+        let smaller = Rect::from_min_size(Pos2::ZERO, Vec2::new(480.0, 320.0));
+        let config = RenderingConfig::default();
+        let old = decoded(120, 80);
+        let mut canvas = CanvasState::default();
+        canvas.reset_view_fit(120.0, 80.0, viewport);
+        canvas.prepare_image_change(Some(&old));
+        canvas.initialize_image(80.0, 120.0, viewport, &config);
+        assert_eq!(canvas.scale, CanvasState::fit_scale(80.0, 120.0, viewport));
+
+        canvas.resize_viewport(smaller, &config);
+        assert_eq!(canvas.scale, CanvasState::fit_scale(80.0, 120.0, smaller));
+    }
+
+    #[test]
+    fn actual_size_and_pan_offset_survive_resize() {
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(480.0, 320.0));
+        let larger = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let mut canvas = CanvasState::default();
+        canvas.reset_view_actual_size(200.0, 100.0, viewport);
+        canvas.pan += Vec2::new(18.0, -26.0);
+        canvas.target_pan = canvas.pan;
+        let offset = canvas.pan - viewport.center().to_vec2();
+
+        canvas.resize_viewport(larger, &RenderingConfig::default());
+
+        assert_eq!(canvas.scale, 1.0);
+        assert_eq!(canvas.pan - larger.center().to_vec2(), offset);
+        assert_eq!(canvas.target_pan, canvas.pan);
     }
 }
