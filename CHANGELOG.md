@@ -4,6 +4,13 @@ All notable changes to Viewlume are documented in this file. The project follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-21
+
+### Fixed
+
+- Build Linux packages with glibc 2.35 compatibility instead of requiring glibc 2.43.
+- Declare the X11 keyboard runtime dependency in the Debian package.
+
 ## [0.3.0] - 2026-11-21
 
 ### Changed
@@ -73,7 +80,8 @@ All notable changes to Viewlume are documented in this file. The project follows
 - Zoom and position loss when switching between images with different resolutions.
 - Runaway panning caused by applying cumulative drag displacement every frame.
 
-[Unreleased]: https://github.com/vaniley/viewlume/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/vaniley/viewlume/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/vaniley/viewlume/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/vaniley/viewlume/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/vaniley/viewlume/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/vaniley/viewlume/compare/v0.2.0...v0.2.1

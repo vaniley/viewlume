@@ -16,7 +16,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Keep the Linux ABI at Ubuntu 22.04's glibc 2.35.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: viewlume-linux-x86_64
           - os: windows-latest
@@ -51,6 +52,17 @@ jobs:
 
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Check Linux glibc baseline
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/viewlume"
+          newest=$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | cut -d_ -f2 | sort -V | tail -n1)
+          if [[ -z "$newest" || $(printf '%s\n' "$newest" 2.35 | sort -V | tail -n1) != 2.35 ]]; then
+            echo "Expected glibc 2.35 or earlier, found ${newest:-no version}." >&2
+            exit 1
+          fi
 
       - name: Sign Windows executable when a certificate is configured
         if: runner.os == 'Windows'
@@ -94,7 +106,7 @@ jobs:
           cp target/${{ matrix.target }}/release/viewlume dist/deb/usr/bin/
           cp packaging/linux/viewlume.desktop dist/deb/usr/share/applications/
           cp packaging/linux/viewlume.svg dist/deb/usr/share/icons/hicolor/scalable/apps/
-          printf 'Package: viewlume\nVersion: %s\nSection: graphics\nPriority: optional\nArchitecture: amd64\nMaintainer: vaniley\nDepends: libgtk-3-0, libwayland-client0, libxkbcommon0\nDescription: Fast GPU-accelerated image viewer\n' "$version" > dist/deb/DEBIAN/control
+          printf 'Package: viewlume\nVersion: %s\nSection: graphics\nPriority: optional\nArchitecture: amd64\nMaintainer: vaniley\nDepends: libgtk-3-0, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0\nDescription: Fast GPU-accelerated image viewer\n' "$version" > dist/deb/DEBIAN/control
           dpkg-deb --build --root-owner-group dist/deb dist/${{ matrix.artifact }}.deb
           cd dist
           sha256sum ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}.AppImage ${{ matrix.artifact }}.deb > ${{ matrix.artifact }}.sha256
