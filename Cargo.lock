@@ -3575,6 +3575,7 @@ dependencies = [
  "quick_cache",
  "rfd",
  "serde",
+ "tempfile",
  "toml 0.8.23",
  "winres",
 ]

@@ -121,6 +121,11 @@ Viewlume stores settings in the platform configuration directory:
 An existing configuration from the former `image-viewer` name is migrated automatically on first launch.
 The interface supports English and Russian; English is used by default.
 
+Press `S` to open Settings. Use the General, Image, Navigation, and Advanced tabs to find a setting.
+Select Save to apply and keep your changes. Cancel or `Esc` discards unsaved edits.
+Restore defaults previews the default settings in the dialog; the saved settings change only when you select Save.
+The startup window mode and image cache limit take effect the next time you start Viewlume.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports should follow [SECURITY.md](SECURITY.md).
