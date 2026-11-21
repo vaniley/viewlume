@@ -83,6 +83,7 @@ impl SettingsDialog {
             .auto_sized()
             .show(ctx, |ui| {
                 ui.set_width(width);
+                ui.spacing_mut().item_spacing.y = 8.0;
                 ui.add_enabled_ui(!self.confirm_reset, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         for (tab, label) in [
@@ -204,6 +205,7 @@ fn choice<T: Copy + PartialEq>(
 }
 
 fn general(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
+    ui.heading(tr("Language", "Язык"));
     choice(
         ui,
         "language",
@@ -215,7 +217,8 @@ fn general(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
             (Language::Auto, tr("System", "Системный")),
         ],
     );
-    ui.add_space(ui.spacing().item_spacing.y);
+    ui.separator();
+    ui.heading(tr("Window and controls", "Окно и управление"));
     choice(
         ui,
         "startup-mode",
@@ -229,11 +232,10 @@ fn general(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
             ),
         ],
     );
-    ui.weak(tr(
-        "Press F11 to switch modes now.",
-        "Нажмите F11, чтобы переключить режим сейчас.",
+    ui.label(tr(
+        "To switch modes without restarting, close Settings and press F11.",
+        "Чтобы переключить режим без перезапуска, закройте настройки и нажмите F11.",
     ));
-    ui.add_space(ui.spacing().item_spacing.y);
     ui.checkbox(
         &mut config.window.auto_hide_ui,
         tr(
@@ -251,6 +253,30 @@ fn general(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
 }
 
 fn image(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
+    ui.heading(tr("Image display", "Отображение изображения"));
+    choice(
+        ui,
+        "texture-filter",
+        tr("Texture filtering", "Фильтрация изображения"),
+        &mut config.rendering.filter_mode,
+        &[
+            (FilterMode::Auto, tr("Automatic", "Автоматически")),
+            (
+                FilterMode::Nearest,
+                tr("Nearest (sharp pixels)", "Без сглаживания"),
+            ),
+            (FilterMode::Bilinear, tr("Bilinear (smooth)", "Билинейная")),
+        ],
+    );
+    ui.checkbox(
+        &mut config.window.show_checkerboard_for_transparent,
+        tr(
+            "Show checkerboard behind transparent images",
+            "Показывать шахматный фон за прозрачными изображениями",
+        ),
+    );
+    ui.separator();
+    ui.heading(tr("Zoom and pan", "Масштаб и перемещение"));
     choice(
         ui,
         "double-click",
@@ -275,29 +301,6 @@ fn image(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
             ),
         ],
     );
-    ui.add_space(ui.spacing().item_spacing.y);
-    choice(
-        ui,
-        "texture-filter",
-        tr("Texture filtering", "Фильтрация изображения"),
-        &mut config.rendering.filter_mode,
-        &[
-            (FilterMode::Auto, tr("Automatic", "Автоматически")),
-            (
-                FilterMode::Nearest,
-                tr("Nearest (sharp pixels)", "Без сглаживания"),
-            ),
-            (FilterMode::Bilinear, tr("Bilinear (smooth)", "Билинейная")),
-        ],
-    );
-    ui.add_space(ui.spacing().item_spacing.y);
-    ui.checkbox(
-        &mut config.window.show_checkerboard_for_transparent,
-        tr(
-            "Show checkerboard behind transparent images",
-            "Показывать шахматный фон за прозрачными изображениями",
-        ),
-    );
     ui.add(
         Slider::new(&mut config.rendering.zoom_factor, 1.05..=1.50)
             .step_by(0.01)
@@ -321,6 +324,8 @@ fn image(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
             "Короткая инерция перемещения",
         ),
     );
+    ui.separator();
+    ui.heading(tr("Transitions", "Переходы"));
     ui.checkbox(
         &mut config.rendering.animate_image_transitions,
         tr("Animate image changes", "Анимировать смену изображений"),
@@ -400,7 +405,7 @@ fn advanced(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
             .suffix(tr(" MB", " МБ"))
             .text(tr("Image cache limit", "Лимит кеша изображений")),
     );
-    ui.weak(tr(
+    ui.label(tr(
         "Restart Viewlume to apply the cache limit.",
         "Перезапустите Viewlume, чтобы применить лимит кеша.",
     ));
