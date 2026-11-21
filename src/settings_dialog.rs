@@ -20,6 +20,7 @@ pub struct SettingsDialog {
     tab: Tab,
     confirm_reset: bool,
     save_error: Option<String>,
+    editing_number: bool,
 }
 
 #[derive(PartialEq, Eq)]
@@ -39,6 +40,7 @@ impl SettingsDialog {
             self.draft = Some(config.clone());
             self.confirm_reset = false;
             self.save_error = None;
+            self.editing_number = false;
         }
     }
 
@@ -47,15 +49,27 @@ impl SettingsDialog {
         let Some(draft) = self.draft.as_mut() else {
             return false;
         };
+        if *draft == *config {
+            self.save_error = None;
+        }
         let ru = config.general.language.is_russian();
         let tr = move |english, russian| if ru { russian } else { english };
         let screen = ctx.screen_rect();
         let width = (screen.width() - 48.0).clamp(200.0, 464.0);
-        let body_height = (screen.height() - 140.0).clamp(80.0, 285.0);
+        let body_height = (screen.height() - 160.0).clamp(80.0, 285.0);
         let mut action = Action::None;
         let mut open = true;
-        if !ctx.memory(|mem| mem.any_popup_open())
-            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        // Egui clears the focused text field before this pass on Escape. Let
+        // that first press end the edit (or close a combo box), not the dialog.
+        if !self.editing_number
+            && ctx.dragged_id().is_none()
+            && !ctx.memory(|mem| mem.any_popup_open())
+            && ctx.input(|input| {
+                input.events.iter().any(|event| {
+                    matches!(event, egui::Event::Key { key: egui::Key::Escape, pressed: true, repeat: false, modifiers, .. }
+                        if modifiers.is_none())
+                })
+            })
         {
             if self.confirm_reset {
                 self.confirm_reset = false;
@@ -64,7 +78,7 @@ impl SettingsDialog {
             }
         }
 
-        egui::Area::new(Id::new("settings-backdrop"))
+        let backdrop = egui::Area::new(Id::new("settings-backdrop"))
             .order(Order::Middle)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
@@ -73,6 +87,7 @@ impl SettingsDialog {
                 ui.painter()
                     .rect_filled(rect, 0.0, Color32::from_black_alpha(128));
             });
+        ctx.move_to_top(backdrop.response.layer_id);
 
         Window::new(tr("Settings", "Настройки"))
             .id(Id::new("viewer-settings"))
@@ -99,7 +114,7 @@ impl SettingsDialog {
                 ui.separator();
 
                 ScrollArea::vertical()
-                    .id_salt((self.tab, self.confirm_reset))
+                    .id_salt((self.tab, self.confirm_reset, self.save_error.is_some()))
                     .max_height(body_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -114,7 +129,8 @@ impl SettingsDialog {
                                 ui.colored_label(ui.visuals().error_fg_color, tr(
                                     "Could not save settings. Your changes are still here. Try again.",
                                     "Не удалось сохранить настройки. Ваши изменения не потеряны. Повторите попытку.",
-                                )).on_hover_text(error);
+                                ));
+                                ui.add(egui::Label::new(error).wrap());
                             }
                             match self.tab {
                                 Tab::General => general(ui, draft, &tr),
@@ -152,6 +168,10 @@ impl SettingsDialog {
                 });
             });
 
+        self.editing_number = ctx
+            .memory(egui::Memory::focused)
+            .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+
         if !open || action == Action::Cancel {
             self.draft = None;
             ctx.request_repaint();
@@ -173,6 +193,7 @@ impl SettingsDialog {
         match save(&draft) {
             Ok(()) => {
                 *config = draft;
+                self.save_error = None;
                 true
             }
             Err(error) => {
@@ -202,6 +223,11 @@ fn choice<T: Copy + PartialEq>(
         })
         .response
         .labelled_by(label.id);
+}
+
+fn slider(ui: &mut Ui, label: &'static str, slider: Slider<'_>) {
+    let label = ui.label(label);
+    ui.add(slider).labelled_by(label.id);
 }
 
 fn general(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
@@ -301,10 +327,10 @@ fn image(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
             ),
         ],
     );
-    ui.add(
-        Slider::new(&mut config.rendering.zoom_factor, 1.05..=1.50)
-            .step_by(0.01)
-            .text(tr("Zoom speed", "Скорость масштабирования")),
+    slider(
+        ui,
+        tr("Zoom speed", "Скорость масштабирования"),
+        Slider::new(&mut config.rendering.zoom_factor, 1.05..=1.50).step_by(0.01),
     );
     ui.checkbox(
         &mut config.rendering.zoom_towards_cursor,
@@ -330,12 +356,14 @@ fn image(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
         &mut config.rendering.animate_image_transitions,
         tr("Animate image changes", "Анимировать смену изображений"),
     );
-    ui.add_enabled(
-        config.rendering.animate_image_transitions,
-        Slider::new(&mut config.rendering.image_transition_ms, 80.0..=500.0)
-            .suffix(tr(" ms", " мс"))
-            .text(tr("Transition duration", "Длительность перехода")),
-    );
+    ui.add_enabled_ui(config.rendering.animate_image_transitions, |ui| {
+        slider(
+            ui,
+            tr("Transition duration", "Длительность перехода"),
+            Slider::new(&mut config.rendering.image_transition_ms, 80.0..=500.0)
+                .suffix(tr(" ms", " мс")),
+        );
+    });
 }
 
 fn navigation(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
@@ -374,10 +402,11 @@ fn navigation(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
     ui.add_enabled_ui(
         config.filmstrip.visibility != FilmstripVisibility::Hidden,
         |ui| {
-            ui.add(
+            slider(
+                ui,
+                tr("Thumbnail size", "Размер миниатюр"),
                 Slider::new(&mut config.filmstrip.thumbnail_size, 48..=128)
-                    .suffix(tr(" px", " пкс"))
-                    .text(tr("Thumbnail size", "Размер миниатюр")),
+                    .suffix(tr(" px", " пкс")),
             );
             ui.checkbox(
                 &mut config.filmstrip.auto_scroll_to_active,
@@ -399,22 +428,25 @@ fn navigation(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
 
 fn advanced(ui: &mut Ui, config: &mut ViewerConfig, tr: &Translate) {
     ui.heading(tr("Cache and preloading", "Кеш и предзагрузка"));
-    ui.add(
+    slider(
+        ui,
+        tr("Image cache limit", "Лимит кеша изображений"),
         Slider::new(&mut config.cache.max_ram_cache_mb, 256..=4096)
             .step_by(128.0)
-            .suffix(tr(" MB", " МБ"))
-            .text(tr("Image cache limit", "Лимит кеша изображений")),
+            .suffix(tr(" MB", " МБ")),
     );
     ui.label(tr(
         "Restart Viewlume to apply the cache limit.",
         "Перезапустите Viewlume, чтобы применить лимит кеша.",
     ));
     ui.add_space(ui.spacing().item_spacing.y);
-    ui.add(
-        Slider::new(&mut config.cache.prefetch_count, 0..=6).text(tr(
+    slider(
+        ui,
+        tr(
             "Nearby images to preload",
             "Число соседних изображений для предзагрузки",
-        )),
+        ),
+        Slider::new(&mut config.cache.prefetch_count, 0..=6),
     );
 }
 
@@ -439,6 +471,7 @@ mod tests {
             Ok(())
         }));
         assert_eq!(active.general.language, Language::Russian);
+        assert!(dialog.save_error.is_none());
         assert!(!dialog.is_open());
     }
 }

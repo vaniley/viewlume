@@ -15,7 +15,7 @@ Viewlume is a fast, GPU-accelerated image viewer for Linux and Windows. It keeps
 
 - GPU rendering through `egui`, `eframe`, and `wgpu`.
 - Background decoding, bounded thumbnail work, adjacent-image prefetching, and RAM caches.
-- Visual size and on-screen position preserved when switching between different resolutions.
+- Fitted images stay fitted when you switch images or resize the window. Manual zoom and pan carry across images.
 - Cursor-centered zoom and short, configurable pan inertia.
 - Frameless fullscreen overlay with auto-hiding controls.
 - Scrollable cover-flow carousel with virtualized thumbnails.

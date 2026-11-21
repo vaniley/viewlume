@@ -108,7 +108,11 @@ impl CanvasState {
 
     /// Preserve both visual size and the on-screen center across image changes.
     pub fn prepare_image_change(&mut self, image: Option<&DecodedImage>) {
-        if let Some(image) = image {
+        if self.fit_to_viewport {
+            // Keep fitting new images until the user chooses a manual view.
+            self.preserved_extent = None;
+            self.preserved_center = None;
+        } else if let Some(image) = image {
             let rendered_size =
                 Vec2::new(image.width as f32, image.height as f32) * self.target_scale as f32;
             self.preserved_extent = Some(rendered_size.x.max(rendered_size.y));
@@ -460,6 +464,7 @@ mod tests {
         let old = decoded(1920, 1080);
         let mut state = CanvasState::default();
         state.reset_view_fit(old.width as f32, old.height as f32, viewport);
+        state.fit_to_viewport = false; // the user panned the view
         state.target_pan += Vec2::new(73.0, -41.0);
         let old_extent = old.width as f32 * state.target_scale as f32;
         let old_center = state.target_pan
@@ -503,6 +508,22 @@ mod tests {
         assert_eq!(canvas.target_scale, canvas.scale);
         let center = canvas.pan + Vec2::new(1000.0, 800.0) * canvas.scale as f32 * 0.5;
         assert_eq!(center, smaller.center().to_vec2());
+    }
+
+    #[test]
+    fn fitted_view_survives_navigation_between_different_resolutions() {
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0));
+        let smaller = Rect::from_min_size(Pos2::ZERO, Vec2::new(480.0, 320.0));
+        let config = RenderingConfig::default();
+        let old = decoded(120, 80);
+        let mut canvas = CanvasState::default();
+        canvas.reset_view_fit(120.0, 80.0, viewport);
+        canvas.prepare_image_change(Some(&old));
+        canvas.initialize_image(80.0, 120.0, viewport, &config);
+        assert_eq!(canvas.scale, CanvasState::fit_scale(80.0, 120.0, viewport));
+
+        canvas.resize_viewport(smaller, &config);
+        assert_eq!(canvas.scale, CanvasState::fit_scale(80.0, 120.0, smaller));
     }
 
     #[test]

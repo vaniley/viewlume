@@ -1002,7 +1002,7 @@ impl eframe::App for ImageViewerApp {
                     self.navigator.current_index,
                     &self.config.filmstrip,
                     viewport,
-                    cursor_pos,
+                    if settings_open { None } else { cursor_pos },
                     dt,
                 );
                 if let Some(idx) = film_resp.selected_index {
