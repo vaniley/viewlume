@@ -196,7 +196,11 @@ impl ImageViewerApp {
         }
     }
 
-    pub fn new(cc: &eframe::CreationContext<'_>, initial_target: Option<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial_target: Option<PathBuf>,
+        config: ViewerConfig,
+    ) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = Color32::from_rgb(12, 14, 18);
         visuals.window_fill = Color32::from_rgb(24, 27, 33);
@@ -206,7 +210,6 @@ impl ImageViewerApp {
         visuals.widgets.hovered.rounding = egui::Rounding::same(7.0);
         visuals.widgets.active.rounding = egui::Rounding::same(7.0);
         cc.egui_ctx.set_visuals(visuals);
-        let config = ViewerConfig::load();
         let cache = Arc::new(ImageCache::new(
             config.cache.max_ram_cache_mb,
             config.cache.thumbnail_cache_count,
@@ -477,13 +480,16 @@ impl ImageViewerApp {
         match self.window_mode {
             WindowMode::Overlay => {
                 self.window_mode = WindowMode::Windowed;
-                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+                #[cfg(not(windows))]
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
-                ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+                // Let the window system restore its previous placement, including
+                // the size and maximized state, instead of forcing maximize.
+                ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
                 self.show_toast(self.tr("Mode: Windowed", "Режим: оконный"));
             }
             WindowMode::Windowed => {
                 self.window_mode = WindowMode::Overlay;
+                #[cfg(not(windows))]
                 ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
                 ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
                 self.show_toast(
